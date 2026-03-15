@@ -1,0 +1,4395 @@
+---
+title: "Unified Perinatal Dataset Pipeline v10.15"
+author: "Joseph Akuze (LSHTM)"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    number_sections: true
+    df_print: paged
+    code_folding: show
+version: '10.15'
+subtitle: "Data Harmonization for Stillbirth and Neonatal Death Prediction in Sub-Saharan Africa"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.width = 10, fig.height = 6
+)
+
+# ============================================================================
+# REQUIRED PACKAGES
+# ============================================================================
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(lubridate)
+  library(janitor)
+  library(readxl)
+  library(haven)
+  library(tools)
+  library(knitr)
+})
+
+# ============================================================================
+# GLOBAL CONSTANTS
+# ============================================================================
+VERSION <- "10.15"
+
+# EXPECTED STUDY YEARS - FOR VALIDATION
+EXPECTED_YEARS <- list(
+  WHOMCS = c(2010, 2011),
+  `EN-INDEPTH` = c(2017, 2018),
+  NCOPS = c(2018, 2019),
+  ALERT = c(2021, 2023, 2024),
+  PRECISE = c(2019, 2020, 2021, 2022, 2023),
+  PTBi = c(2016, 2017, 2018, 2019)
+)
+```
+
+# Phase 0: Setup and Configuration
+
+## 0.1 File Path Configuration
+
+```{r phase0-config}
+# ============================================================================
+# FILE PATH CONFIGURATION
+# ============================================================================
+USE_FULL_DATA <- TRUE  # DEFAULT REQUIRED
+
+if (USE_FULL_DATA) {
+  FILE_NCOPS    <- "data/ncops_merged.csv"
+  FILE_ALERT    <- "data/ALERT_dataset.dta"
+  FILE_PRECISE  <- "data/PRECISE_dataset.dta"
+  FILE_PTBI     <- "data/PTBI_dataset1.dta"
+  FILE_ENINDEPTH <- "data/EN-INDEPTH_dataset.dta"
+  FILE_WHOMCS   <- "data/WHOMCS_dataset.dta"
+  # SES / wealth quintile linked files
+  FILE_PRECISE_SES <- "data/PRECISE_SES.dta"
+  FILE_NCOPS_SES   <- "data/SES_wealth_quintiles.dta"
+} else {
+  FILE_NCOPS    <- "/mnt/project/ncops_sample.csv"
+  FILE_ALERT    <- "/mnt/project/ALERT_sample.csv"
+  FILE_PRECISE  <- "/mnt/project/PRECISE_sample.csv"
+  FILE_PTBI     <- "/mnt/project/PTBi_sample.csv"
+  FILE_ENINDEPTH <- "/mnt/project/ENINDEPTH_sample.csv"
+  FILE_WHOMCS   <- "/mnt/project/whomcs_sample.csv"
+  # SES / wealth quintile linked files
+  FILE_PRECISE_SES <- "/mnt/project/PRECISE_SES_sample.csv"
+  FILE_NCOPS_SES   <- "/mnt/project/ses_ncops.csv"
+}
+
+dir.create("intermediate", showWarnings = FALSE, recursive = TRUE)
+dir.create("output", showWarnings = FALSE, recursive = TRUE)
+
+cat("=== FILE PATH CONFIGURATION ===\n")
+cat(sprintf("Using %s data\n", ifelse(USE_FULL_DATA, "FULL", "SAMPLE")))
+cat(sprintf("NCOPS:      %s\n", FILE_NCOPS))
+cat(sprintf("ALERT:      %s\n", FILE_ALERT))
+cat(sprintf("PRECISE:    %s\n", FILE_PRECISE))
+cat(sprintf("PTBi:       %s\n", FILE_PTBI))
+cat(sprintf("EN-INDEPTH: %s\n", FILE_ENINDEPTH))
+cat(sprintf("WHOMCS:     %s\n", FILE_WHOMCS))
+cat(sprintf("PRECISE SES:%s\n", FILE_PRECISE_SES))
+cat(sprintf("NCOPS SES:  %s\n", FILE_NCOPS_SES))
+```
+
+## 0.2 Utility Functions
+
+```{r phase0-utilities}
+# ============================================================================
+# FLEXIBLE DATA LOADING FUNCTION
+# ============================================================================
+safe_load_data <- function(filepath, encoding = "UTF-8") {
+  if (!file.exists(filepath)) {
+    warning(sprintf("File not found: %s", filepath))
+    return(NULL)
+  }
+  
+  ext <- tolower(tools::file_ext(filepath))
+  
+  tryCatch({
+    df <- switch(ext,
+      "csv" = {
+        tryCatch(
+          readr::read_csv(filepath, show_col_types = FALSE, 
+                         locale = locale(encoding = encoding)),
+          error = function(e) {
+            message(sprintf("Retrying %s with latin1 encoding...", basename(filepath)))
+            tryCatch(
+              readr::read_csv(filepath, show_col_types = FALSE, 
+                             locale = locale(encoding = "latin1")),
+              error = function(e2) {
+                message("Retrying with cp1252...")
+                readr::read_csv(filepath, show_col_types = FALSE,
+                               locale = locale(encoding = "cp1252"))
+              }
+            )
+          }
+        )
+      },
+      "dta" = haven::read_dta(filepath),
+      "xlsx" = readxl::read_excel(filepath),
+      "xls" = readxl::read_excel(filepath),
+      "rds" = readRDS(filepath),
+      {
+        warning(sprintf("Unknown extension '%s', attempting read_csv", ext))
+        readr::read_csv(filepath, show_col_types = FALSE)
+      }
+    )
+    
+    df <- janitor::clean_names(df)
+    message(sprintf("✓ Loaded %s: %d rows x %d cols", basename(filepath), nrow(df), ncol(df)))
+    return(df)
+    
+  }, error = function(e) {
+    warning(sprintf("✗ Failed to load %s: %s", filepath, e$message))
+    return(NULL)
+  })
+}
+
+# ============================================================================
+# SAFE COLUMN ACCESS FUNCTIONS
+# ============================================================================
+get_col <- function(df, col_name, default = NA) {
+  if (col_name %in% names(df)) {
+    return(df[[col_name]])
+  } else {
+    return(rep(default, nrow(df)))
+  }
+}
+
+get_col_chr <- function(df, col_name) {
+  if (col_name %in% names(df)) {
+    return(as.character(df[[col_name]]))
+  } else {
+    return(rep(NA_character_, nrow(df)))
+  }
+}
+
+get_col_num <- function(df, col_name) {
+  if (col_name %in% names(df)) {
+    return(suppressWarnings(as.numeric(df[[col_name]])))
+  } else {
+    return(rep(NA_real_, nrow(df)))
+  }
+}
+
+# ============================================================================
+# STRING AND DATE UTILITIES
+# ============================================================================
+as_yesno <- function(x) {
+  x0 <- tolower(trimws(as.character(x)))
+  case_when(
+    is.na(x) ~ NA_character_,
+    x0 %in% c("yes", "y", "1", "true", "t") ~ "Yes",
+    x0 %in% c("no", "n", "0", "false", "f") ~ "No",
+    TRUE ~ NA_character_
+  )
+}
+
+parse_date_multi <- function(x) {
+  if (inherits(x, "Date")) return(x)
+  if (inherits(x, "POSIXct") || inherits(x, "POSIXt")) return(as_date(x))
+  x_chr <- as.character(x)
+  suppressWarnings({
+    d <- parse_date_time(x_chr, orders = c(
+      "dmy", "dmY", "Ymd", "mdY", "ymd HMS", "dmy HMS", "mdy", 
+      "B d, Y", "d B Y", "dBY", "dby", "dbY"
+    ), quiet = TRUE)
+  })
+  as_date(d)
+}
+
+## ★ v10.15 Fix: Stata datetime (tc) converter for CSV data
+## Stata clock time = milliseconds since 1960-01-01 00:00:00
+## Used for ALERT q23birth which is stored as Stata datetime in .dta
+## but appears as raw numeric in CSV exports
+parse_stata_datetime <- function(x) {
+  x_num <- suppressWarnings(as.numeric(as.character(x)))
+  result <- as.Date(as.POSIXct(x_num / 1000, origin = "1960-01-01", tz = "UTC"))
+  # Validate: reasonable date range only
+  result[is.na(result) | result < as.Date("1900-01-01") | result > as.Date("2030-12-31")] <- NA
+  result
+}
+
+safe_numeric <- function(x) {
+  suppressWarnings(as.numeric(as.character(x)))
+}
+
+std_sex <- function(x) {
+  x_chr <- tolower(trimws(as.character(x)))
+  case_when(
+    x_chr %in% c("male", "m", "1") ~ "Male",
+    x_chr %in% c("female", "f", "2") ~ "Female",
+    TRUE ~ NA_character_
+  )
+}
+
+std_delivery_mode <- function(x) {
+  x_chr <- tolower(trimws(as.character(x)))
+  case_when(
+    # ★ v10.11 Fix #8: Updated delivery mode categories
+    str_detect(x_chr, "vaginal|svd|normal|spontaneous") & !str_detect(x_chr, "cesar|caes|assisted|operative|vacuum|forcep|instrumental") ~ "Vaginal spontaneous",
+    str_detect(x_chr, "cesar|caes|c-section|c_section|cs|lscs") ~ "Caesarean",
+    str_detect(x_chr, "operative|instrumental|vacuum|forcep|assisted|ventouse") ~ "Vaginal assisted",
+    str_detect(x_chr, "breech") ~ "Vaginal breech",
+    TRUE ~ NA_character_
+  )
+}
+
+# ★ v10.9: Standardized delivery location categories
+# Categories: Hospital, Health center, Home, En route, Other, Unknown
+std_delivery_location <- function(x) {
+  x_chr <- tolower(trimws(as.character(x)))
+  case_when(
+    # Hospital - any level
+    str_detect(x_chr, "hospital|tertiary|regional|district") ~ "Hospital",
+    # Health center / PHC / Clinic
+    str_detect(x_chr, "phc|primary|health cent|clinic") & 
+      !str_detect(x_chr, "private") ~ "Health center",
+    # Private facility
+    str_detect(x_chr, "private") ~ "Private facility",
+    # Home delivery
+    str_detect(x_chr, "^home$|home delivery|at home") ~ "Home",
+    # En route / Born before arrival
+    str_detect(x_chr, "en route|transit|on the way|bba|born before|another facility") ~ "En route/Other facility",
+    # Direct admission (from ALERT referral - means came directly to facility)
+    str_detect(x_chr, "direct admission") ~ "Hospital",
+    # Referred (from ALERT - means transferred from elsewhere)
+    str_detect(x_chr, "referred") ~ "Hospital",
+    # Unknown / Don't know
+    str_detect(x_chr, "unknown|don.*know") ~ NA_character_,
+    # Other
+    str_detect(x_chr, "other") ~ "Other",
+    # If not matched, return original for review
+    !is.na(x_chr) & x_chr != "" ~ x_chr,
+    TRUE ~ NA_character_
+  )
+}
+
+convert_bw <- function(x) {
+  bw <- safe_numeric(x)
+  ifelse(!is.na(bw) & bw < 10, bw * 1000, bw)
+}
+
+# ============================================================================
+# ★ v10.11 FIX #7: STANDARDIZE EDUCATION CATEGORIES
+# Categories: None, Primary, Secondary, Higher
+# ============================================================================
+std_education <- function(x) {
+  x_chr <- tolower(trimws(as.character(x)))
+  
+  case_when(
+    is.na(x) | x_chr == "" | x_chr == "na" ~ NA_character_,
+    
+    # None / No education (includes "unknown" per user request)
+    str_detect(x_chr, "^no$|^none$|no educ|never|no school|not sure|don.*know|unknown") ~ "None",
+    
+    # Primary
+    str_detect(x_chr, "primary|p[1-7]|grade\\s*[1-7]|elementary|incomplete primary|complete primary") ~ "Primary",
+    
+    # Secondary (includes O-level and A-level)
+    str_detect(x_chr, "secondary|o.level|o'\\s*level|a.level|a'\\s*level|s[1-6]|high school|jss|sss") ~ "Secondary",
+    
+    # Higher education
+    str_detect(x_chr, "tertiary|univ|college|degree|diploma|higher|post.?secondary|vocational") ~ "Higher",
+    
+    # Numeric years -> categorize
+    TRUE ~ {
+      yrs <- suppressWarnings(as.numeric(x_chr))
+      case_when(
+        is.na(yrs) ~ NA_character_,
+        yrs == 0 ~ "None",
+        yrs >= 1 & yrs <= 6 ~ "Primary",
+        yrs >= 7 & yrs <= 12 ~ "Secondary",
+        yrs > 12 ~ "Higher",
+        TRUE ~ NA_character_
+      )
+    }
+  )
+}
+
+# ============================================================================
+# ★ v10.11 FIX #9: STANDARDIZE MARITAL STATUS CATEGORIES
+# Categories: Married/Cohabiting, Single/Never married, Divorced/Separated, Widowed
+# ============================================================================
+std_marital_status <- function(x) {
+  x_chr <- tolower(trimws(as.character(x)))
+  
+  case_when(
+    is.na(x) | x_chr == "" | x_chr == "na" ~ NA_character_,
+    
+    # Married/Cohabiting
+    str_detect(x_chr, "married|cohabit|living with|living together|union") ~ "Married/Cohabiting",
+    
+    # Single/Never married
+    str_detect(x_chr, "single|never married|never been married|unmarried") ~ "Single/Never married",
+    
+    # Divorced/Separated
+    str_detect(x_chr, "divorced|separated|divorce|separat") ~ "Divorced/Separated",
+    
+    # Widowed
+    str_detect(x_chr, "widow") ~ "Widowed",
+    
+    TRUE ~ NA_character_
+  )
+}
+
+# ============================================================================
+# ★ v10.11 FIX #15: HYPERTENSION STAGING
+# Categories: Normal, Stage 1 Hypertension, Stage 2 Hypertension
+# ============================================================================
+std_hypertension_stage <- function(sbp, dbp, has_hypertension = NULL) {
+  case_when(
+    is.na(sbp) & is.na(dbp) & (is.null(has_hypertension) | is.na(has_hypertension)) ~ NA_character_,
+    
+    # Stage 2: SBP ≥160 or DBP ≥100
+    (!is.na(sbp) & sbp >= 160) | (!is.na(dbp) & dbp >= 100) ~ "Stage 2 Hypertension",
+    
+    # Stage 1: SBP 140-159 or DBP 90-99
+    (!is.na(sbp) & sbp >= 140) | (!is.na(dbp) & dbp >= 90) ~ "Stage 1 Hypertension",
+    
+    # If has_hypertension flag but BP values don't indicate staging
+    !is.null(has_hypertension) & has_hypertension == "Yes" ~ "Hypertension (stage unknown)",
+    
+    # Normal
+    (!is.na(sbp) & sbp < 140) & (!is.na(dbp) & dbp < 90) ~ "Normal",
+    
+    TRUE ~ NA_character_
+  )
+}
+```
+
+## 0.3 Schema Definition
+
+```{r phase0-schema}
+# ============================================================================
+# COMPLETE VARIABLE SCHEMA
+# ★ v10.11: Added new variables for SGA classification, hypertension staging, etc.
+# ★ v10.12: Added study_design, module, sample_weight for stratified analysis & DHS integration
+# ★ v10.13: Added out_ga_method; fixed NCOPS module to Prospective neonatal cohort; fixed PTBi module to Facility birth registry
+# ★ v10.15: CRITICAL FIX - ALERT out_dob now uses q23birth (actual birth date) instead of
+#           q9dob (EDD); added parse_stata_datetime() for CSV epoch handling; added fallback
+#           out_ageatdeath/out_dod computation in derive_outcomes(); DHS b6=200 early/late NND
+#           classification returns NA instead of incorrect "No"
+# ============================================================================
+SCHEMA <- list(
+  identifiers = c("unified_id", "study_source", "study_design", "module", "sample_weight", "out_ga_method",
+                   "raw_id", "raw_id_secondary"),
+  
+  outcomes = c(
+    "out_stillbirth", "out_stillbirth_20wks", "out_stillbirth_28wks",
+    "out_fresh_stillbirth", "out_macerated_stillbirth",
+    "out_livebirth", "out_nnd", "out_nnd_early", "out_nnd_late",
+    "out_perinatal_death", "out_ga_weeks", "out_ga_days",
+    "out_birthweight_g", "out_birthweight_centile", "out_birthweight_zscore",
+    "out_infant_sex", "out_apgar_1min", "out_apgar_5min", "out_apgar_10min",
+    "out_sga", "out_lga", "out_aga", "out_sizeforGA",  # ★ v10.11: Added out_aga and out_sizeforGA
+    "out_lbw", "out_vlbw", "out_elbw",
+    "out_preterm", "out_very_preterm", "out_extremely_preterm",
+    "out_dod", "out_dob_source", "out_ageatdeath", "out_multiple"  # ★ v10.11: Added out_dob_source
+  ),
+  
+  maternal = c(
+    "mat_age", "mat_marital_status", "mat_religion", "mat_education",
+    "mat_literacy", "mat_occupation", "mat_ethnicity",
+    "mat_country", "mat_facility", "mat_district", "mat_urban_rural",
+    "mat_gravidity", "mat_parity", "mat_previous_cs", "mat_previous_stillbirth", "mat_previous_csection",  # ★ v10.11: Added mat_previous_csection
+    "mat_anc_visits", "mat_anc_provider", "mat_hiv_status", "mat_syphilis",
+    "mat_height", "mat_weight", "mat_bmi", "mat_muac",
+    "mat_sbp", "mat_dbp", "mat_hypertension", "mat_hypertension_stage",  # ★ v10.11: Added mat_hypertension_stage
+    "mat_preeclampsia", "mat_eclampsia", "mat_aph",  # ★ v10.11: Added mat_eclampsia and mat_aph
+    "mat_diabetes", "mat_malaria", "mat_anaemia",  # ★ v10.11: Added mat_diabetes, mat_malaria, mat_anaemia
+    "mat_delivery_mode", "mat_csection",  # ★ v10.11: Added mat_csection
+    "mat_delivery_location", "mat_birth_attendant",
+    "mat_prolonged_labour", "mat_obstructed_labour", "mat_prom"
+  ),
+  
+  household = c(
+    "hh_ppi_score", "hh_ppi_band", "hh_poverty_likelihood",
+    "hh_wealth_quintile", "hh_ses_binary",
+    "hh_wall_material", "hh_floor_material", "hh_ownership", "hh_num_rooms",
+    "hh_cooking_fuel", "hh_heating_fuel", "hh_lighting",
+    "hh_electricity", "hh_water_source", "hh_sanitation", "hh_hygiene",
+    "hh_mosquito_net", "hh_size", "hh_monthly_income"
+  ),
+  
+  location = c(
+    "loc_country", "loc_region", "loc_district", "loc_facility",
+    "loc_village", "loc_latitude", "loc_longitude",
+    "loc_urban_rural", "loc_facility_type"
+  ),
+  
+  temporal = c("study_date", "studyyear", "out_dob", "yob", "delivery_date_raw", 
+               "conception_date", "conception_date_source")  # ★ v10.11: Added conception_date_source
+)
+
+ALL_SCHEMA_VARS <- unlist(SCHEMA, use.names = FALSE)
+
+# Derived outcomes function
+# ★ v10.11 Fix #6: Improved early/late NND logic with proper mutual exclusivity
+derive_outcomes <- function(df) {
+  df %>%
+    mutate(
+      ## ★ v10.15 Fix: Fallback computations for ageatdeath and DOD
+      ## These catch any study where one is available but the other wasn't set
+      
+      # Compute out_ageatdeath from DOD - DOB if still missing
+      out_ageatdeath = {
+        days_calc <- as.numeric(difftime(out_dod, out_dob, units = "days"))
+        days_valid <- ifelse(!is.na(days_calc) & days_calc >= 0 & days_calc <= 28, 
+                             days_calc, NA_real_)
+        case_when(
+          !is.na(out_ageatdeath) ~ out_ageatdeath,  # keep existing
+          out_stillbirth == "Yes" ~ 0,                # stillbirths = 0
+          out_nnd == "Yes" & !is.na(out_dod) & !is.na(out_dob) ~ days_valid,
+          TRUE ~ out_ageatdeath
+        )
+      },
+      
+      # Compute out_dod from DOB + ageatdeath if still missing
+      out_dod = case_when(
+        !is.na(out_dod) ~ out_dod,  # keep existing
+        out_stillbirth == "Yes" & !is.na(out_dob) ~ out_dob,  # stillbirth DOD = DOB
+        out_nnd == "Yes" & !is.na(out_dob) & !is.na(out_ageatdeath) & out_ageatdeath >= 0 ~
+          out_dob + as.integer(out_ageatdeath),
+        TRUE ~ out_dod
+      ),
+      
+      out_lbw = case_when(
+        out_birthweight_g < 2500 ~ "Yes",
+        out_birthweight_g >= 2500 ~ "No",
+        TRUE ~ NA_character_
+      ),
+      out_vlbw = case_when(
+        out_birthweight_g < 1500 ~ "Yes",
+        out_birthweight_g >= 1500 ~ "No",
+        TRUE ~ NA_character_
+      ),
+      out_elbw = case_when(
+        out_birthweight_g < 1000 ~ "Yes",
+        out_birthweight_g >= 1000 ~ "No",
+        TRUE ~ NA_character_
+      ),
+      out_preterm = case_when(
+        out_ga_weeks < 37 ~ "Yes",
+        out_ga_weeks >= 37 ~ "No",
+        TRUE ~ NA_character_
+      ),
+      out_very_preterm = case_when(
+        out_ga_weeks < 32 ~ "Yes",
+        out_ga_weeks >= 32 ~ "No",
+        TRUE ~ NA_character_
+      ),
+      out_extremely_preterm = case_when(
+        out_ga_weeks < 28 ~ "Yes",
+        out_ga_weeks >= 28 ~ "No",
+        TRUE ~ NA_character_
+      ),
+      out_perinatal_death = case_when(
+        out_stillbirth == "Yes" | out_nnd == "Yes" ~ "Yes",
+        out_stillbirth == "No" & (out_nnd == "No" | is.na(out_nnd)) ~ "No",
+        TRUE ~ NA_character_
+      ),
+      # ★ v10.11 Fix #6: FIXED Early NND logic
+      # Must be a live birth AND NND AND age at death 0-7 days
+      out_nnd_early = case_when(
+        out_livebirth != "Yes" ~ NA_character_,
+        out_nnd == "No" ~ "No",  # NOT an NND = not early NND
+        out_nnd == "Yes" & !is.na(out_ageatdeath) & out_ageatdeath >= 0 & out_ageatdeath <= 7 ~ "Yes",
+        out_nnd == "Yes" & !is.na(out_ageatdeath) & out_ageatdeath > 7 ~ "No",  # FIXED: Late NND gets "No" for early
+        out_nnd == "Yes" & is.na(out_ageatdeath) ~ NA_character_,
+        TRUE ~ NA_character_
+      ),
+      # ★ v10.11 Fix #6: FIXED Late NND logic
+      # Must be a live birth AND NND AND age at death 8-28 days
+      out_nnd_late = case_when(
+        out_livebirth != "Yes" ~ NA_character_,
+        out_nnd == "No" ~ "No",  # NOT an NND = not late NND
+        out_nnd == "Yes" & !is.na(out_ageatdeath) & out_ageatdeath > 7 & out_ageatdeath <= 28 ~ "Yes",
+        out_nnd == "Yes" & !is.na(out_ageatdeath) & out_ageatdeath <= 7 ~ "No",  # FIXED: Early NND gets "No" for late
+        out_nnd == "Yes" & is.na(out_ageatdeath) ~ NA_character_,
+        TRUE ~ NA_character_
+      ),
+      # ★ v10.9: Compute stillbirth thresholds from GA
+      # Stillbirth at 28+ weeks (WHO definition for international comparison)
+      out_stillbirth_28wks = case_when(
+        out_stillbirth != "Yes" ~ NA_character_,
+        !is.na(out_ga_weeks) & out_ga_weeks >= 28 ~ "Yes",
+        !is.na(out_ga_weeks) & out_ga_weeks < 28 ~ "No",
+        TRUE ~ NA_character_
+      ),
+      # Stillbirth at 20+ weeks (US/clinical definition)
+      out_stillbirth_20wks = case_when(
+        out_stillbirth != "Yes" ~ NA_character_,
+        !is.na(out_ga_weeks) & out_ga_weeks >= 20 ~ "Yes",
+        !is.na(out_ga_weeks) & out_ga_weeks < 20 ~ "No",
+        TRUE ~ NA_character_
+      )
+    )
+}
+
+# Ensure complete schema
+ensure_complete_schema <- function(df) {
+  missing_vars <- setdiff(ALL_SCHEMA_VARS, names(df))
+  for (v in missing_vars) {
+    df[[v]] <- NA
+  }
+  df %>% select(any_of(ALL_SCHEMA_VARS), everything())
+}
+```
+
+# Phase 1: Load Raw Data
+
+```{r phase1-load}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                     PHASE 1: LOADING RAW DATA                              ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+raw_ncops     <- safe_load_data(FILE_NCOPS)
+raw_alert     <- safe_load_data(FILE_ALERT)
+raw_precise   <- safe_load_data(FILE_PRECISE)
+raw_ptbi      <- safe_load_data(FILE_PTBI)
+raw_enindepth <- safe_load_data(FILE_ENINDEPTH)
+raw_whomcs    <- safe_load_data(FILE_WHOMCS)
+
+# ============================================================================
+# LOAD AND MERGE SES / WEALTH QUINTILE FILES
+# ============================================================================
+
+# --- NCOPS SES ---
+raw_ncops_ses <- safe_load_data(FILE_NCOPS_SES)
+if (!is.null(raw_ncops_ses) && !is.null(raw_ncops) && "unique_id" %in% names(raw_ncops_ses)) {
+  # Ensure join key exists in both
+  if ("unique_id" %in% names(raw_ncops)) {
+    n_before <- nrow(raw_ncops)
+    raw_ncops <- raw_ncops %>%
+      left_join(raw_ncops_ses %>% select(unique_id, any_of(c("asset_index", "quintile"))),
+                by = "unique_id")
+    cat(sprintf("✓ Merged NCOPS SES: %d/%d matched\n",
+                sum(!is.na(raw_ncops$quintile)), n_before))
+  }
+}
+
+# --- PRECISE SES ---
+raw_precise_ses <- safe_load_data(FILE_PRECISE_SES)
+if (!is.null(raw_precise_ses) && !is.null(raw_precise) && "f2a_participant_id" %in% names(raw_precise_ses)) {
+  # Handle haven_labelled in .dta SES file
+  if ("wealth_quintile" %in% names(raw_precise_ses)) {
+    raw_precise_ses <- raw_precise_ses %>%
+      mutate(wealth_quintile = suppressWarnings(as.numeric(as.character(
+        if (inherits(wealth_quintile, "haven_labelled")) haven::as_factor(wealth_quintile) else wealth_quintile
+      ))))
+  }
+  if ("f2a_participant_id" %in% names(raw_precise)) {
+    n_before <- nrow(raw_precise)
+    raw_precise <- raw_precise %>%
+      left_join(raw_precise_ses %>% select(f2a_participant_id, any_of(c("wealth_quintile"))),
+                by = "f2a_participant_id")
+    cat(sprintf("✓ Merged PRECISE SES: %d/%d matched\n",
+                sum(!is.na(raw_precise$wealth_quintile)), n_before))
+  }
+}
+```
+
+# Phase 2: Harmonization Functions
+
+## 2.1 NCOPS Harmonization
+
+```{r phase2-ncops}
+harmonize_ncops <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(tibble() %>% ensure_complete_schema())
+  
+  n <- nrow(df)
+  
+  # ============================================================================
+  # HELPER: Decode NCOPS variables that may be numeric-coded OR string-labelled
+  # ============================================================================
+  # When imported from .dta via haven, variables may be haven_labelled (numeric
+
+  # with value labels). When imported from CSV, they may already be strings.
+  # This helper handles both formats by checking if each value is a known
+  # numeric code and mapping it to the appropriate label.
+  
+  decode_var <- function(x, label_map) {
+    if (is.null(x) || length(x) == 0) return(rep(NA_character_, n))
+    
+    # If haven_labelled, decode first
+    if (inherits(x, "haven_labelled")) {
+      x <- haven::as_factor(x, levels = "labels")
+    }
+    
+    x_chr <- trimws(as.character(x))
+    x_num <- suppressWarnings(as.numeric(x_chr))
+    result <- x_chr
+    
+    # Map numeric codes to their labels
+    for (code in names(label_map)) {
+      lbl <- label_map[[code]]
+      # Match by numeric code (handles both numeric and character "1", "2", etc.)
+      idx <- !is.na(x_num) & x_num == as.numeric(code)
+      result[idx] <- lbl
+    }
+    
+    # Clean up: blank strings and literal "NA" become true NA
+    result[is.na(x) | result == "" | result == "NA" | result == "nan"] <- NA_character_
+    return(result)
+  }
+  
+  # ============================================================================
+  # HELPER: Safe numeric extraction (handles string, numeric, haven_labelled)
+  # ============================================================================
+  safe_num <- function(col_name) {
+    if (!col_name %in% names(df)) return(rep(NA_real_, n))
+    x <- df[[col_name]]
+    if (inherits(x, "haven_labelled")) x <- as.numeric(x)
+    return(suppressWarnings(as.numeric(as.character(x))))
+  }
+  
+  # ============================================================================
+  # HELPER: Safe character extraction with multiple column fallback
+  # Returns the first column found that has data; prefers columns with more data
+  # ============================================================================
+  safe_chr <- function(...) {
+    col_names <- c(...)
+    for (col_name in col_names) {
+      if (col_name %in% names(df)) {
+        x <- df[[col_name]]
+        if (inherits(x, "haven_labelled")) x <- haven::as_factor(x, levels = "labels")
+        x <- trimws(as.character(x))
+        x[x == "" | x == "NA" | x == "nan"] <- NA_character_
+        if (sum(!is.na(x)) > 0) return(x)
+      }
+    }
+    return(rep(NA_character_, n))
+  }
+  
+  # ============================================================================
+  # NCOPS VALUE LABEL DEFINITIONS (from NCOPS Stata do-file)
+  # ============================================================================
+  # These map numeric codes (used in .dta) to their string labels
+  
+  lbl_yesno <- c("1" = "Yes", "2" = "No")
+  lbl_yesno_unk <- c("1" = "Yes", "2" = "No", "3" = "Unknown")
+  
+  lbl_status <- c(
+    "1" = "Alive with no disabilities", "2" = "Dead",
+    "3" = "Lost to follow-up",          "4" = "Alive with disabilities"
+    # Note: "Referred" also appears in some data exports
+  )
+  
+  lbl_gender <- c("1" = "Male", "2" = "Female")
+  
+  lbl_marital_rel <- c("1" = "Married", "2" = "Single")
+  
+  lbl_marital_det <- c(
+    "1" = "Married living with the husband",
+    "2" = "Married living away from my husband",
+    "3" = "Never Married", "4" = "Widow", "5" = "Divorced/Seperated"
+  )
+  
+  lbl_district <- c(
+    "1" = "Jinja", "2" = "Iganga", "3" = "Buikwe",
+    "4" = "Mayuge", "5" = "Others", "6" = "Unknown"
+  )
+  
+  lbl_religion <- c(
+    "1" = "Catholic", "2" = "Anglican", "3" = "Moslem",
+    "4" = "Born Again", "5" = "Others"
+  )
+  
+  lbl_religioo <- c(
+    "1" = "Catholic", "2" = "Protestant", "3" = "Muslim",
+    "4" = "Pentecostal", "5" = "SDA", "6" = "Others"
+  )
+  
+  lbl_education <- c(
+    "1" = "Primary incomplete",     "2" = "'O' Level incomplete",
+    "3" = "'A' Level incomplete",   "4" = "Primary complete",
+    "5" = "'O' level complete",     "6" = "'A' level complete",
+    "7" = "University/Tertiary",    "8" = "Not sure/Don't know"
+  )
+  
+  lbl_occupation <- c(
+    "1" = "Not employed/house wife", "2" = "Farmer",
+    "3" = "Small scale business",    "4" = "Business",
+    "5" = "Salaried worker",         "6" = "Labourer"
+  )
+  
+  lbl_delivery <- c("1" = "Normal SVD", "2" = "Caesarean", "3" = "Vacuum")
+  
+  lbl_birth_loc <- c(
+    "1" = "Hospital",   "2" = "Home", "3" = "Another Facility",
+    "4" = "On the way to hospital", "5" = "Unknown"
+  )
+  
+  lbl_attendant <- c(
+    "1" = "Doctor", "2" = "TBA", "3" = "Midwife/Nurse",
+    "4" = "Family Member", "5" = "Other", "6" = "Unknown"
+  )
+  
+  lbl_hiv_result <- c("1" = "TR", "2" = "TRR")
+  
+  lbl_vdrl_result <- c("1" = "Reactive", "2" = "Non-Reactive")
+  
+  lbl_referral <- c(
+    "1" = "Self referral", "2" = "Health Centre", "3" = "Hospital",
+    "4" = "Private Clinic", "5" = "Private Hospital/NGO/PNFP/Mission"
+  )
+  
+  lbl_walls <- c("1" = "Mud/Wattle", "2" = "Metal", "3" = "Bricks", "4" = "Wood")
+  
+  lbl_floor <- c("1" = "Earth/Mud", "2" = "Concrete", "3" = "Bricks/Tiles")
+  
+  lbl_ownership <- c("1" = "Rent", "2" = "Own")
+  
+  lbl_fuel <- c(
+    "1" = "Firewood/charcl/dung", "2" = "Paraffin", "3" = "Electricity/Gas"
+  )
+  
+  lbl_water <- c(
+    "1" = "More than 30 minutes walk from house",
+    "2" = "Less than 30 mins walk",
+    "3" = "Tap inside household"
+  )
+  
+  lbl_toilet <- c(
+    "1" = "No Toilet",
+    "2" = "toilet shared with other households",
+    "3" = "Toilet in household"
+  )
+  
+  lbl_multiple <- c(
+    "1" = "Singleton", "2" = "Twin", "3" = "Triplet", "4" = "Quad"
+  )
+  
+  # ============================================================================
+  # PRE-DECODE ALL KEY VARIABLES
+  # ============================================================================
+  # This step ensures variables are usable strings regardless of input format
+  
+  # -- Section 1: Outcomes --
+  status_decoded <- decode_var(safe_chr("status_of_baby_at_dischargf"), lbl_status)
+  status_lower   <- tolower(status_decoded)
+  gender_decoded  <- decode_var(safe_chr("gender"), lbl_gender)
+  delivery_decoded <- decode_var(safe_chr("mode_of_delivery"), lbl_delivery)
+  birth_loc_decoded <- decode_var(safe_chr("birth_location"), lbl_birth_loc)
+  attendant_decoded <- decode_var(safe_chr("birth_attendant"), lbl_attendant)
+  
+  # Multiple pregnancy (may not exist in all exports)
+  multiple_decoded <- if ("multiple_pregnancy" %in% names(df)) {
+    decode_var(safe_chr("multiple_pregnancy"), lbl_multiple)
+  } else {
+    rep(NA_character_, n)
+  }
+  
+  # -- Section 2: Maternal Demographics --
+  # Marital status: prefer detailed (socdem) with fallback to simple (demographics)
+  marital_detailed <- decode_var(safe_chr("marital_status"), lbl_marital_det)
+  marital_simple   <- decode_var(safe_chr("marital_status_relationship"), lbl_marital_rel)
+  marital_combined <- ifelse(!is.na(marital_detailed), marital_detailed,
+                             ifelse(!is.na(marital_simple), marital_simple, NA_character_))
+  
+  # Religion: prefer religioo (socdem, 532/536) with fallback to religion (521/536)
+  religion_socdem <- decode_var(safe_chr("religioo"), lbl_religioo)
+  religion_demo   <- decode_var(safe_chr("religion"), lbl_religion)
+  religion_combined <- ifelse(!is.na(religion_socdem), religion_socdem,
+                              ifelse(!is.na(religion_demo), religion_demo, NA_character_))
+  
+  # Education: combine school attendance + level achieved
+  school_attended <- decode_var(safe_chr("have_you_ever_attended_school"), lbl_yesno)
+  education_level <- decode_var(safe_chr("if_yes_what_is_the_highest_leve"), lbl_education)
+  education_combined <- case_when(
+    !is.na(education_level) & education_level != "Not sure/Don't know" ~ education_level,
+    !is.na(school_attended) & school_attended == "No" ~ "None",
+    !is.na(education_level) & education_level == "Not sure/Don't know" ~ "Not sure/Don't know",
+    !is.na(school_attended) & school_attended == "Yes" ~ "Unknown level",
+    TRUE ~ NA_character_
+  )
+  
+  # Occupation
+  occupation_decoded <- decode_var(safe_chr("what_is_your_primary_occupation"), lbl_occupation)
+  
+  # District
+  district_decoded <- decode_var(safe_chr("mother_s_district_of_residence"), lbl_district)
+  
+  # HIV: combine testing status with result
+  # IF_YES_RESULT: TR = Test Reactive (positive), TRR = Test Result non-Reactive (negative)
+  hiv_tested <- decode_var(safe_chr("mother_tested_for_hiv"), lbl_yesno)
+  hiv_result <- decode_var(safe_chr("if_yes_result"), lbl_hiv_result)
+  hiv_combined <- case_when(
+    !is.na(hiv_result) & hiv_result == "TR"  ~ "Positive",
+    !is.na(hiv_result) & hiv_result == "TRR" ~ "Negative",
+    !is.na(hiv_tested) & hiv_tested == "No"  ~ "Not tested",
+    !is.na(hiv_tested) & hiv_tested == "Yes" ~ "Tested, result unknown",
+    TRUE ~ NA_character_
+  )
+  
+  # Syphilis (VDRL/TPHA): combine testing with result
+  vdrl_tested <- decode_var(safe_chr("vdrl_tpha_during_pregnancy"), lbl_yesno)
+  vdrl_result <- decode_var(safe_chr("if_yes"), lbl_vdrl_result)
+  syphilis_combined <- case_when(
+    !is.na(vdrl_result) & vdrl_result == "Reactive"     ~ "Positive",
+    !is.na(vdrl_result) & vdrl_result == "Non-Reactive"  ~ "Negative",
+    !is.na(vdrl_tested) & vdrl_tested == "No"             ~ "Not tested",
+    !is.na(vdrl_tested) & vdrl_tested == "Yes"            ~ "Tested, result unknown",
+    TRUE ~ NA_character_
+  )
+  
+  # Pregnancy complication Yes/No variables
+  hypertension_decoded  <- decode_var(safe_chr("hypertension"), lbl_yesno)
+  preeclampsia_decoded  <- decode_var(safe_chr("high_blood_pressure_elampsia"), lbl_yesno)
+  prolonged_decoded     <- decode_var(safe_chr("prolonged_labour"), lbl_yesno)
+  obstructed_decoded    <- decode_var(safe_chr("obstructed_labour"), lbl_yesno)
+  prom_decoded          <- decode_var(safe_chr("pre_labor_rupture_of_membranes"), lbl_yesno)
+  
+  # ANC attendance
+  anc_decoded <- decode_var(safe_chr("anc_attendance"), lbl_yesno)
+  
+  # -- Section 3: Household/SES --
+  walls_decoded       <- decode_var(safe_chr("what_are_your_house_walls_made_o"), lbl_walls)
+  floor_decoded       <- decode_var(safe_chr("what_is_your_house_floor_made_of"), lbl_floor)
+  ownership_decoded   <- decode_var(safe_chr("do_you_own_or_rent_your_house"), lbl_ownership)
+  fuel_decoded        <- decode_var(safe_chr("what_is_the_primary_fuel_used_fo"), lbl_fuel)
+  electricity_decoded <- decode_var(safe_chr("do_you_have_electricity_at_home"), lbl_yesno)
+  water_decoded       <- decode_var(safe_chr("where_do_you_get_your_clean_drin"), lbl_water)
+  toilet_decoded      <- decode_var(safe_chr("what_toilet_facilities_do_you_ha"), lbl_toilet)
+  mosquito_decoded    <- decode_var(safe_chr("do_you_sleep_under_mosquito_net"), lbl_yesno)
+  
+  # ============================================================================
+  # ID
+  # ============================================================================
+  id_raw <- safe_chr("unique_id")
+  
+  # ============================================================================
+  # BUILD UNIFIED TIBBLE
+  # ============================================================================
+  result <- tibble(
+    unified_id       = paste0("NCOPS_", seq_len(n)),
+    study_source     = "NCOPS",
+    study_design     = "Facility-based",
+    module           = "Prospective neonatal cohort",
+    sample_weight    = NA_real_,
+    raw_id           = ifelse(!is.na(id_raw), id_raw, paste0("ncops_", seq_len(n))),
+    raw_id_secondary = NA_character_,
+    
+    # -- Dates --
+    study_date       = parse_date_multi(safe_chr("date_of_examination")),
+    studyyear        = as.integer(year(parse_date_multi(
+                         safe_chr("date_of_examination", "date_of_birth")))),
+    out_dob          = parse_date_multi(safe_chr("date_of_birth")),
+    yob              = as.integer(year(parse_date_multi(safe_chr("date_of_birth")))),
+    delivery_date_raw = parse_date_multi(safe_chr("date_of_birth")),
+    conception_date  = as.Date(NA),
+    
+    # ==========================================================================
+    # SECTION 1: PRIMARY OUTCOME VARIABLES
+    # ==========================================================================
+    # CRITICAL: NCOPS recruited ONLY live births into the study.
+    # There are NO stillbirths in this dataset by design.
+    # The status_of_baby_at_dischargf variable captures DISCHARGE status
+    # (after admission as a live neonate), not birth status.
+    # "Dead" at discharge = neonatal death (baby was born alive, died later).
+    
+    out_stillbirth   = "No",
+    out_livebirth    = "Yes",
+    
+    out_nnd = case_when(
+      status_lower %in% "dead" ~ "Yes",
+      status_lower %in% c("alive with no disabilities",
+                           "alive with disabilities",
+                           "lost to follow-up",
+                           "referred") ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    out_fresh_stillbirth     = "No",
+    out_macerated_stillbirth = "No",
+    out_stillbirth_20wks     = "No",
+    out_stillbirth_28wks     = "No",
+    
+    # GA: ballard_score IS the gestational age in weeks from Ballard assessment
+    out_ga_weeks         = safe_num("ballard_score"),
+    out_ga_days          = safe_num("ballard_score") * 7,
+    out_ga_method        = "Ballard score",
+    out_birthweight_g    = convert_bw(get_col(df, "birth_weight_kg")),
+    out_birthweight_centile = NA_real_,
+    out_birthweight_zscore  = NA_real_,
+    out_infant_sex       = std_sex(gender_decoded),
+    out_apgar_1min       = safe_num("apgar_at_1min"),
+    out_apgar_5min       = safe_num("apgar_at_5min"),
+    out_apgar_10min      = NA_real_,
+    out_sga              = NA_character_,
+    out_lga              = NA_character_,
+    out_dod              = parse_date_multi(safe_chr("if_death_date_of_deati")),
+    out_ageatdeath       = NA_real_,
+    out_multiple = case_when(
+      !is.na(multiple_decoded) & multiple_decoded == "Singleton" ~ "No",
+      !is.na(multiple_decoded) & multiple_decoded %in% c("Twin", "Triplet", "Quad") ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    
+    # ==========================================================================
+    # SECTION 2: MATERNAL DEMOGRAPHICS
+    # ==========================================================================
+    
+    mat_age             = safe_num("mother_s_age"),
+    mat_marital_status  = marital_combined,
+    mat_religion        = religion_combined,
+    mat_education       = education_combined,
+    mat_literacy        = NA_character_,
+    mat_occupation      = occupation_decoded,
+    mat_ethnicity       = NA_character_,
+    mat_country         = "Uganda",
+    mat_facility        = safe_chr("facility_name"),
+    mat_district        = district_decoded,
+    mat_urban_rural     = NA_character_,
+    
+    # Gravidity = number_of_pregnacies (per mapping document)
+    mat_gravidity       = safe_num("number_of_pregnacies"),
+    
+    # Parity = number_of_live_children (per mapping document:
+    # "NCOPS: Derived: number_of_live_children")
+    mat_parity          = safe_num("number_of_live_children"),
+    
+    mat_previous_cs     = NA_real_,
+    mat_previous_stillbirth = NA_character_,
+    mat_anc_visits      = safe_num("number_of_anc_visits"),
+    mat_anc_provider    = NA_character_,
+    mat_hiv_status      = hiv_combined,
+    mat_syphilis        = syphilis_combined,
+    mat_height          = NA_real_,
+    mat_weight          = NA_real_,
+    mat_bmi             = NA_real_,
+    mat_muac            = NA_real_,
+    mat_sbp             = safe_num("sbp"),
+    mat_dbp             = safe_num("dbp"),
+    mat_hypertension    = hypertension_decoded,
+    mat_preeclampsia    = preeclampsia_decoded,
+    mat_delivery_mode   = std_delivery_mode(delivery_decoded),
+    mat_delivery_location = birth_loc_decoded,
+    mat_birth_attendant = attendant_decoded,
+    mat_prolonged_labour  = prolonged_decoded,
+    mat_obstructed_labour = obstructed_decoded,
+    mat_prom            = prom_decoded,
+    
+    # ==========================================================================
+    # SECTION 3: HOUSEHOLD SOCIOECONOMIC INDICATORS
+    # ==========================================================================
+    
+    hh_ppi_score        = NA_real_,
+    hh_ppi_band         = NA_character_,
+    hh_poverty_likelihood = NA_real_,
+    # hh_wealth_quintile: from merged ses_ncops file (quintile column)
+    # NCOPS quintile is string: "Poorest","Poor","Middle class","Wealthy","Wealthiest"
+    # Standardise to: 1=Poorest, 2=Poor, 3=Middle class, 4=Wealthy, 5=Wealthiest
+    hh_wealth_quintile  = {
+      q_raw <- safe_chr("quintile")
+      q_lower <- tolower(trimws(q_raw))
+      case_when(
+        q_lower == "poorest"      ~ "1 - Poorest",
+        q_lower == "poor"         ~ "2 - Poor",
+        q_lower == "middle class" ~ "3 - Middle class",
+        q_lower == "wealthy"      ~ "4 - Wealthy",
+        q_lower == "wealthiest"   ~ "5 - Wealthiest",
+        # Numeric fallback (if loaded from .dta with numeric codes)
+        suppressWarnings(as.numeric(q_raw)) == 1 ~ "1 - Poorest",
+        suppressWarnings(as.numeric(q_raw)) == 2 ~ "2 - Poor",
+        suppressWarnings(as.numeric(q_raw)) == 3 ~ "3 - Middle class",
+        suppressWarnings(as.numeric(q_raw)) == 4 ~ "4 - Wealthy",
+        suppressWarnings(as.numeric(q_raw)) == 5 ~ "5 - Wealthiest",
+        TRUE ~ NA_character_
+      )
+    },
+    hh_ses_binary       = NA_character_,
+    hh_wall_material    = walls_decoded,
+    hh_floor_material   = floor_decoded,
+    hh_ownership        = ownership_decoded,
+    hh_num_rooms        = safe_num("how_many_rooms_in_your_house_i"),
+    hh_cooking_fuel     = fuel_decoded,
+    hh_heating_fuel     = NA_character_,
+    hh_lighting         = NA_character_,
+    hh_electricity      = electricity_decoded,
+    hh_water_source     = water_decoded,
+    hh_sanitation       = toilet_decoded,
+    hh_hygiene          = NA_character_,
+    hh_mosquito_net     = mosquito_decoded,
+    hh_size             = safe_num("how_many_people_including_yours"),
+    hh_monthly_income   = safe_num("what_is_your_personnal_monthly_i"),
+    
+    # ==========================================================================
+    # LOCATION
+    # ==========================================================================
+    loc_country       = "Uganda",
+    loc_region        = NA_character_,
+    loc_district      = district_decoded,
+    loc_facility      = safe_chr("facility_name"),
+    loc_village       = safe_chr("village"),
+    loc_latitude      = NA_real_,
+    loc_longitude     = NA_real_,
+    loc_urban_rural   = NA_character_,
+    loc_facility_type = NA_character_
+  )
+  
+  # ============================================================================
+  # POST-PROCESSING: Derive age at death from dates
+  # ============================================================================
+  result <- result %>%
+    mutate(
+      out_ageatdeath = ifelse(
+        out_nnd == "Yes" & !is.na(out_dod) & !is.na(out_dob),
+        as.numeric(difftime(out_dod, out_dob, units = "days")),
+        NA_real_
+      ),
+      # Safety: age at death must be non-negative and plausible (0-28 days for NND)
+      out_ageatdeath = ifelse(
+        !is.na(out_ageatdeath) & out_ageatdeath >= 0 & out_ageatdeath <= 28,
+        out_ageatdeath, NA_real_
+      ),
+      # Fallback study year from DOB if examination date missing
+      studyyear = ifelse(is.na(studyyear) & !is.na(yob), yob, studyyear),
+      
+      # Compute mat_age_cat from mat_age
+      mat_age_cat = case_when(
+        is.na(mat_age) ~ NA_character_,
+        mat_age < 20 ~ "<20",
+        mat_age >= 20 & mat_age < 25 ~ "20-24",
+        mat_age >= 25 & mat_age < 30 ~ "25-29",
+        mat_age >= 30 & mat_age < 35 ~ "30-34",
+        mat_age >= 35 ~ "35+",
+        TRUE ~ NA_character_
+      )
+    )
+  
+  result %>% derive_outcomes() %>% ensure_complete_schema()
+}
+```
+
+## 2.2 ALERT Harmonization
+##
+## UPDATED: Robust haven_labelled handling for .dta imports
+## - Added safe_num / safe_lbl / match_any helpers for dual numeric+string matching
+## - Multi-source country derivation (country → count → hosp → hospn first digit)
+## - Fixed duplicate out_nnd, fixed regex patterns that failed on bare numeric codes
+## - Added delivery mode from q24mode, multiple birth from q25babies
+## - Added gest_age (days) as fallback GA source
+## - Corrected apgar mapping: q30apg → out_apgar_1min (per ALERT CRF)
+
+```{r phase2-alert}
+harmonize_alert <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(tibble() %>% ensure_complete_schema())
+  
+  n <- nrow(df)
+  
+  # ============================================================================
+  # HAVEN-AWARE HELPERS
+  # Handle both haven_labelled (.dta numeric codes) and plain strings (CSV)
+  # ============================================================================
+  
+  # Get underlying numeric value - strips haven labels, keeps number
+  safe_num <- function(x) {
+    if (is.null(x)) return(rep(NA_real_, n))
+    if (inherits(x, "haven_labelled")) return(as.numeric(unclass(x)))
+    suppressWarnings(as.numeric(as.character(x)))
+  }
+  
+  # Get label text for haven_labelled, or lowercase string as-is
+  safe_lbl <- function(x) {
+    if (is.null(x)) return(rep(NA_character_, n))
+    if (inherits(x, "haven_labelled")) {
+      tryCatch(tolower(as.character(haven::as_factor(x))),
+               error = function(e) tolower(as.character(x)))
+    } else {
+      tolower(as.character(x))
+    }
+  }
+  
+  # Dual match: TRUE if numeric value is in nums OR label text matches regex pattern
+  match_any <- function(x, nums = NULL, patterns = NULL) {
+    x_num <- safe_num(x)
+    x_lbl <- safe_lbl(x)
+    hit <- rep(FALSE, length(x_num))
+    if (!is.null(nums)) {
+      hit <- hit | (x_num %in% nums & !is.na(x_num))
+    }
+    if (!is.null(patterns)) {
+      for (p in patterns) {
+        m <- str_detect(x_lbl, regex(p, ignore_case = TRUE))
+        m[is.na(m)] <- FALSE
+        hit <- hit | m
+      }
+    }
+    hit
+  }
+  
+  # ============================================================================
+  # SECTION 1: PRIMARY OUTCOME VARIABLES
+  # ============================================================================
+  
+  # --- Birth outcome: q27out (1=Alive, 2=Fresh stillbirth, 3=Macerated stillbirth) ---
+  q27 <- get_col(df, "q27out")
+  is_alive     <- match_any(q27, nums = 1, patterns = c("alive"))
+  is_fresh_sb  <- match_any(q27, nums = 2, patterns = c("fresh"))
+  is_mac_sb    <- match_any(q27, nums = 3, patterns = c("macer"))
+  is_stillbirth <- is_fresh_sb | is_mac_sb
+  has_outcome  <- is_alive | is_stillbirth
+  
+  # --- Neonatal death ---
+  # Primary: neonataldeath (binary 0/1)
+  nnd_val <- safe_num(get_col(df, "neonataldeath"))
+  
+  # Fallback: q44status (1=Alive, 2=Dead, 3=Died within 24h)
+  q44 <- get_col(df, "q44status")
+  is_dead_q44 <- match_any(q44, nums = c(2, 3), patterns = c("dead|died"))
+  is_alive_q44 <- match_any(q44, nums = 1, patterns = c("alive"))
+  
+  # Fallback: q45status (1=Alive, 3=Died within 24h, 4=Died after 24h)
+  q45 <- get_col(df, "q45status")
+  is_dead_q45 <- match_any(q45, nums = c(3, 4), patterns = c("died|dead"))
+  is_alive_q45 <- match_any(q45, nums = 1, patterns = c("alive"))
+  
+  out_nnd_final <- case_when(
+    !is_alive ~ NA_character_,  # NND only applies to live births
+    nnd_val == 1 | is_dead_q44 | is_dead_q45 ~ "Yes",
+    nnd_val == 0 | is_alive_q44 | is_alive_q45 ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  # --- Infant sex: q29sex (1=Male, 2=Female) ---
+  # NOTE: ALERT q29sex may contain garbage values (e.g., "10", "9", "8", "Yes", "No")
+  # Only accept valid sex values - numeric codes 1/2 OR exact string matches
+  sex_raw <- get_col(df, "q29sex")
+  sex_lbl <- safe_lbl(sex_raw)
+  sex_num_val <- safe_num(sex_raw)
+  
+  infant_sex <- case_when(
+    # Numeric code matching (most reliable for .dta files)
+    sex_num_val == 1 ~ "Male",
+    sex_num_val == 2 ~ "Female",
+    # Exact string matching for decoded labels (NOT partial matching)
+    sex_lbl %in% c("male", "m", "1. male") ~ "Male",
+    sex_lbl %in% c("female", "f", "2. female") ~ "Female",
+    # Do NOT map other values - they are data entry errors
+    TRUE ~ NA_character_
+  )
+  
+  # --- Gestational age ---
+  # Primary: q9aga (weeks)
+  ga_wks <- safe_num(get_col(df, "q9aga"))
+  ga_wks <- ifelse(!is.na(ga_wks) & ga_wks >= 20 & ga_wks <= 45, ga_wks, NA_real_)
+  
+  # Fallback: gest_age (days) → convert to weeks
+  ga_days_raw <- safe_num(get_col(df, "gest_age"))
+  ga_from_days <- ifelse(!is.na(ga_days_raw) & ga_days_raw >= 140 & ga_days_raw <= 315,
+                         floor(ga_days_raw / 7), NA_real_)
+  ga_wks <- coalesce(ga_wks, ga_from_days)
+  
+  # --- Birth weight ---
+  # Primary: q28weight (grams)
+  bw_raw <- safe_num(get_col(df, "q28weight"))
+  bw_g <- case_when(
+    !is.na(bw_raw) & bw_raw >= 100 & bw_raw <= 9000 ~ bw_raw,          # already grams
+    !is.na(bw_raw) & bw_raw > 0 & bw_raw < 10 ~ bw_raw * 1000,         # kg → grams
+    TRUE ~ NA_real_
+  )
+  # Fallback: bwt_kg (kilograms)
+  bwt_kg_val <- safe_num(get_col(df, "bwt_kg"))
+  bw_from_kg <- ifelse(!is.na(bwt_kg_val) & bwt_kg_val > 0 & bwt_kg_val < 10,
+                       bwt_kg_val * 1000, NA_real_)
+  bw_g <- coalesce(bw_g, bw_from_kg)
+  
+  # --- Apgar score: q30apg (Apgar at 1 minute per ALERT CRF) ---
+  apgar_val <- safe_num(get_col(df, "q30apg"))
+  apgar_1 <- ifelse(!is.na(apgar_val) & apgar_val >= 0 & apgar_val <= 10, apgar_val, NA_real_)
+  
+  # --- SGA: pre-calculated (may be numeric 0/1 or text categories) ---
+  sga_raw <- get_col(df, "sga")
+  sga_n <- safe_num(sga_raw)
+  sga_l <- safe_lbl(sga_raw)
+  out_sga <- case_when(
+    (!is.na(sga_n) & sga_n == 1) | str_detect(sga_l, "small for gestational|severely small") ~ "Yes",
+    (!is.na(sga_n) & sga_n == 0) | str_detect(sga_l, "appropriate for gestational|large for gestational") ~ "No",
+    TRUE ~ NA_character_
+  )
+  out_lga <- case_when(
+    str_detect(sga_l, "large for gestational") ~ "Yes",
+    str_detect(sga_l, "small|appropriate") ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  # --- Preterm: pre-calculated (numeric 0/1 or text), with GA fallback ---
+  preterm_raw <- get_col(df, "preterm")
+  pt_n <- safe_num(preterm_raw)
+  pt_l <- safe_lbl(preterm_raw)
+  out_preterm <- case_when(
+    (!is.na(pt_n) & pt_n == 1) | str_detect(pt_l, "preterm|yes") ~ "Yes",
+    (!is.na(pt_n) & pt_n == 0) | (str_detect(pt_l, "term|no") & !str_detect(pt_l, "pre")) ~ "No",
+    !is.na(ga_wks) & ga_wks < 37 ~ "Yes",
+    !is.na(ga_wks) & ga_wks >= 37 ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  # --- Delivery mode: q24mode (1=SVD, 2=CS, 3=Vacuum, 5=Assisted breech) ---
+  mode_raw <- get_col(df, "q24mode")
+  del_mode <- case_when(
+    match_any(mode_raw, nums = 1, patterns = c("spontaneous|vaginal")) ~ "Vaginal",
+    match_any(mode_raw, nums = 2, patterns = c("caesarean|cesarean|c.section")) ~ "Caesarean",
+    match_any(mode_raw, nums = c(3, 5), patterns = c("vacuum|assisted|instrumental")) ~ "Vaginal assisted",
+    TRUE ~ NA_character_
+  )
+  # Also check CS variable as fallback
+  cs_raw <- get_col(df, "CS")
+  cs_lbl <- safe_lbl(cs_raw)
+  del_mode <- case_when(
+    !is.na(del_mode) ~ del_mode,
+    str_detect(cs_lbl, "^cs$|caesarean|cesarean") ~ "Caesarean",
+    str_detect(cs_lbl, "vaginal") ~ "Vaginal",
+    TRUE ~ NA_character_
+  )
+  
+  # --- Multiple birth: q25babies (1=Singleton, 2=Multiples) ---
+  babies_raw <- get_col(df, "q25babies")
+  out_multiple <- case_when(
+    match_any(babies_raw, nums = 2, patterns = c("multiple")) ~ "Yes",
+    match_any(babies_raw, nums = 1, patterns = c("singleton")) ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  # ============================================================================
+  # SECTION 2: MATERNAL DEMOGRAPHICS
+  # ============================================================================
+  
+  # --- Maternal age: q3age (numeric years) ---
+  age_raw <- safe_num(get_col(df, "q3age"))
+  mat_age <- ifelse(!is.na(age_raw) & age_raw >= 10 & age_raw <= 60, age_raw, NA_real_)
+  
+  mat_age_cat <- case_when(
+    !is.na(mat_age) & mat_age < 20 ~ "<20",
+    !is.na(mat_age) & mat_age >= 20 & mat_age <= 24 ~ "20-24",
+    !is.na(mat_age) & mat_age >= 25 & mat_age <= 29 ~ "25-29",
+    !is.na(mat_age) & mat_age >= 30 & mat_age <= 34 ~ "30-34",
+    !is.na(mat_age) & mat_age >= 35 ~ "35+",
+    TRUE ~ NA_character_
+  )
+  
+  # --- Country: MULTI-SOURCE DERIVATION ---
+  # Source 1: country variable (numeric 1=Benin, 2=Malawi, 3=Tanzania, 4=Uganda)
+  cty_raw <- get_col(df, "country")
+  cty_num <- safe_num(cty_raw)
+  cty_lbl <- safe_lbl(cty_raw)
+  
+  country_from_var <- case_when(
+    cty_num == 1 | str_detect(cty_lbl, "benin")    ~ "Benin",
+    cty_num == 2 | str_detect(cty_lbl, "malawi")   ~ "Malawi",
+    cty_num == 3 | str_detect(cty_lbl, "tanzania")  ~ "Tanzania",
+    cty_num == 4 | str_detect(cty_lbl, "uganda")    ~ "Uganda",
+    TRUE ~ NA_character_
+  )
+  
+  # Source 2: count variable (might be original country name string or numeric)
+  cnt_raw <- get_col(df, "count")
+  cnt_num <- safe_num(cnt_raw)
+  cnt_lbl <- safe_lbl(cnt_raw)
+  
+  country_from_count <- case_when(
+    cnt_num == 1 | str_detect(cnt_lbl, "benin")    ~ "Benin",
+    cnt_num == 2 | str_detect(cnt_lbl, "malawi")   ~ "Malawi",
+    cnt_num == 3 | str_detect(cnt_lbl, "tanzania")  ~ "Tanzania",
+    cnt_num == 4 | str_detect(cnt_lbl, "uganda")    ~ "Uganda",
+    TRUE ~ NA_character_
+  )
+  
+  # Source 3: hosp variable - slice off country name from "Country-Hospital-N"
+  hosp_raw <- tolower(as.character(get_col(df, "hosp")))
+  country_from_hosp <- case_when(
+    str_detect(hosp_raw, "benin")    ~ "Benin",
+    str_detect(hosp_raw, "malawi")   ~ "Malawi",
+    str_detect(hosp_raw, "tanzania") ~ "Tanzania",
+    str_detect(hosp_raw, "uganda")   ~ "Uganda",
+    TRUE ~ NA_character_
+  )
+  
+  # Source 4: hospn first digit → country code (1=Benin, 2=Malawi, 3=Tanzania, 4=Uganda)
+  hospn_raw <- as.character(get_col(df, "hospn"))
+  hospn_lbl <- safe_lbl(get_col(df, "hospn"))
+  # Try to get first digit from either the raw value or the label
+  hospn_first <- suppressWarnings(as.numeric(substr(trimws(coalesce(hospn_lbl, hospn_raw)), 1, 1)))
+  
+  country_from_hospn <- case_when(
+    hospn_first == 1 ~ "Benin",
+    hospn_first == 2 ~ "Malawi",
+    hospn_first == 3 ~ "Tanzania",
+    hospn_first == 4 ~ "Uganda",
+    TRUE ~ NA_character_
+  )
+  
+  # Chain all sources (first non-NA wins)
+  mat_country_parsed <- coalesce(country_from_var, country_from_count,
+                                  country_from_hosp, country_from_hospn)
+  
+  # --- Facility ---
+  # hospn may be string name or haven_labelled code; hospnam may be numeric code
+  fac_lbl <- safe_lbl(get_col(df, "hospn"))
+  fac_chr <- get_col_chr(df, "hospnam")
+  hosp_chr <- as.character(get_col(df, "hosp"))
+  facility <- coalesce(
+    ifelse(nchar(fac_lbl) > 2, fac_lbl, NA_character_),   # prefer string name
+    ifelse(nchar(hosp_chr) > 2, hosp_chr, NA_character_),  # fallback to hosp
+    fac_chr                                                 # last resort: code
+  )
+  
+  # --- Gravidity: q4grav (numeric) ---
+  grav_val <- safe_num(get_col(df, "q4grav"))
+  mat_grav <- ifelse(!is.na(grav_val) & grav_val >= 1 & grav_val <= 20, grav_val, NA_real_)
+  
+  # --- Parity: q6par (numeric) ---
+  par_val <- safe_num(get_col(df, "q6par"))
+  mat_par <- ifelse(!is.na(par_val) & par_val >= 0 & par_val <= 15, par_val, NA_real_)
+  
+  # --- Previous caesarean: q7ces (numeric count, or Yes/No) ---
+  cs_prev_raw <- get_col(df, "q7ces")
+  cs_prev_num <- safe_num(cs_prev_raw)
+  mat_prev_cs <- case_when(
+    !is.na(cs_prev_num) & cs_prev_num >= 0 & cs_prev_num <= 10 ~ cs_prev_num,
+    TRUE ~ NA_real_
+  )
+  
+  # --- ANC visits: q8anc (numeric count, or Yes/No for attended) ---
+  anc_raw <- get_col(df, "q8anc")
+  anc_num <- safe_num(anc_raw)
+  mat_anc <- ifelse(!is.na(anc_num) & anc_num >= 0 & anc_num <= 20, anc_num, NA_real_)
+  
+  # --- HIV: q11hiv (1=Reactive/positive, 2=Non-reactive/negative, 3=Unknown, 4=Not done) ---
+  hiv_raw <- get_col(df, "q11hiv")
+  mat_hiv <- case_when(
+    match_any(hiv_raw, nums = 1, patterns = c("reactive|positive|^yes$")) ~ "Positive",
+    match_any(hiv_raw, nums = 2, patterns = c("non.reactive|negative|^no$")) ~ "Negative",
+    match_any(hiv_raw, nums = c(3, 4), patterns = c("unknown|not done|not tested")) ~ "Unknown",
+    TRUE ~ NA_character_
+  )
+  
+  # --- Syphilis: q10syp (1=Reactive, 2=Non-reactive, 3=Unknown, 4=Not done) ---
+  syp_raw <- get_col(df, "q10syp")
+  mat_syp <- case_when(
+    match_any(syp_raw, nums = 1, patterns = c("reactive|positive|^yes$")) ~ "Positive",
+    match_any(syp_raw, nums = 2, patterns = c("non.reactive|negative|^no$")) ~ "Negative",
+    match_any(syp_raw, nums = c(3, 4), patterns = c("unknown|not done|not tested")) ~ "Unknown",
+    TRUE ~ NA_character_
+  )
+  
+  # ★ v10.9: Hypertension from q37bp (Yes/No/Not documented)
+  hyp_raw <- get_col(df, "q37bp")
+  mat_hyp <- case_when(
+    match_any(hyp_raw, nums = 1, patterns = c("^yes$")) ~ "Yes",
+    match_any(hyp_raw, nums = 2, patterns = c("^no$")) ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  # ★ v10.9: Delivery location from q2ref (referral status)
+  # Yes = referred from another facility; No = direct admission
+  ref_raw <- get_col(df, "q2ref")
+  mat_del_loc <- case_when(
+    match_any(ref_raw, nums = 1, patterns = c("^yes$")) ~ "Referred from another facility",
+    match_any(ref_raw, nums = 2, patterns = c("^no$")) ~ "Direct admission",
+    TRUE ~ NA_character_
+  )
+  
+  # ============================================================================
+  # PRE-COMPUTE BIRTH DATE (used for out_dob, yob, delivery_date_raw)
+  # ============================================================================
+  ## ★ v10.15 Fix: q23birth = actual date/time of birth (PRIMARY)
+  ##   q9dob = expected date of birth / due date / GA (FALLBACK only)
+  ##   Previously used q9dob (EDD) which caused negative age-at-death
+  ##   for preterm births since EDD > actual DOB
+  alert_dob <- {
+    # Primary: q23birth (actual birth datetime)
+    dob_primary <- parse_date_multi(get_col(df, "q23birth"))
+    # If text parsing fails (CSV with Stata datetime ms), try Stata conversion
+    if (sum(!is.na(dob_primary)) == 0) {
+      dob_primary <- parse_stata_datetime(get_col(df, "q23birth"))
+    }
+    # Fallback: q9dob (EDD) only when actual birth date unavailable
+    dob_fallback <- parse_date_multi(get_col(df, "q9dob"))
+    if (sum(!is.na(dob_fallback)) == 0) {
+      dob_fallback <- parse_stata_datetime(get_col(df, "q9dob"))
+    }
+    coalesce(dob_primary, dob_fallback)
+  }
+  
+  # ============================================================================
+  # BUILD RESULT TIBBLE
+  # ============================================================================
+  
+  result <- tibble(
+    unified_id = paste0("ALERT_", seq_len(n)),
+    study_source = "ALERT",
+    study_design     = "Facility-based",
+    module           = "Facility birth registry",
+    sample_weight    = NA_real_,
+    raw_id = get_col_chr(df, "alert_id"),
+    raw_id_secondary = NA_character_,
+    
+    study_date = parse_date_multi(get_col(df, "q1date")),
+    studyyear = {
+      yr <- safe_num(get_col(df, "year"))
+      yr <- ifelse(!is.na(yr) & yr >= 2015 & yr <= 2030, yr, NA_real_)
+      coalesce(yr, as.numeric(year(parse_date_multi(get_col(df, "q1date")))))
+    },
+    ## ★ v10.15 Fix: q23birth = actual date/time of birth (primary)
+    ##   q9dob = expected date of birth / due date / GA (fallback only)
+    ##   Previously used q9dob (EDD) which caused negative age-at-death
+    ##   for preterm births since EDD > actual DOB
+    out_dob = alert_dob,
+    yob = as.integer(year(alert_dob)),
+    delivery_date_raw = alert_dob,
+    conception_date = as.Date(NA),
+    
+    # ---- Section 1: Primary outcomes ----
+    out_stillbirth = case_when(
+      is_stillbirth ~ "Yes",
+      is_alive ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_livebirth = case_when(
+      is_alive ~ "Yes",
+      is_stillbirth ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_fresh_stillbirth = case_when(
+      is_fresh_sb ~ "Yes",
+      has_outcome & !is_fresh_sb ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_macerated_stillbirth = case_when(
+      is_mac_sb ~ "Yes",
+      has_outcome & !is_mac_sb ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_stillbirth_20wks = case_when(
+      is_stillbirth & !is.na(ga_wks) & ga_wks >= 20 ~ "Yes",
+      is_alive ~ "No",
+      is_stillbirth & is.na(ga_wks) ~ "Unknown GA",
+      is_stillbirth & ga_wks < 20 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_stillbirth_28wks = case_when(
+      is_stillbirth & !is.na(ga_wks) & ga_wks >= 28 ~ "Yes",
+      is_alive ~ "No",
+      is_stillbirth & is.na(ga_wks) ~ "Unknown GA",
+      is_stillbirth & ga_wks < 28 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_nnd = out_nnd_final,
+    
+    out_ga_weeks = ga_wks,
+    out_ga_days = ga_wks * 7,
+    out_ga_method = "Clinical estimate (facility registry)",
+    out_birthweight_g = bw_g,
+    out_birthweight_centile = NA_real_,
+    out_birthweight_zscore = NA_real_,
+    out_infant_sex = infant_sex,
+    out_apgar_1min = apgar_1,
+    out_apgar_5min = NA_real_,
+    out_apgar_10min = NA_real_,
+    out_sga = out_sga,
+    out_lga = out_lga,
+    out_preterm = out_preterm,
+    out_very_preterm = case_when(
+      !is.na(ga_wks) & ga_wks < 32 ~ "Yes",
+      !is.na(ga_wks) & ga_wks >= 32 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_extremely_preterm = case_when(
+      !is.na(ga_wks) & ga_wks < 28 ~ "Yes",
+      !is.na(ga_wks) & ga_wks >= 28 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_lbw = case_when(
+      !is.na(bw_g) & bw_g < 2500 ~ "Yes",
+      !is.na(bw_g) & bw_g >= 2500 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_vlbw = case_when(
+      !is.na(bw_g) & bw_g < 1500 ~ "Yes",
+      !is.na(bw_g) & bw_g >= 1500 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_elbw = case_when(
+      !is.na(bw_g) & bw_g < 1000 ~ "Yes",
+      !is.na(bw_g) & bw_g >= 1000 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_dod = parse_date_multi(get_col(df, "q48dod")),
+    out_ageatdeath = NA_real_,
+    out_multiple = out_multiple,
+    
+    # ---- Section 2: Maternal demographics ----
+    mat_age = mat_age,
+    mat_age_cat = mat_age_cat,
+    mat_marital_status = NA_character_,   # Not collected in ALERT
+    mat_religion = NA_character_,          # Not collected in ALERT
+    mat_education = NA_character_,         # Not collected in ALERT
+    mat_literacy = NA_character_,          # Not collected in ALERT
+    mat_occupation = NA_character_,        # Not collected in ALERT
+    mat_ethnicity = NA_character_,         # Not collected in ALERT
+    mat_country = mat_country_parsed,
+    mat_facility = facility,
+    mat_district = NA_character_,
+    mat_urban_rural = NA_character_,
+    mat_gravidity = mat_grav,
+    mat_parity = mat_par,
+    mat_previous_cs = mat_prev_cs,
+    mat_previous_stillbirth = NA_character_,
+    mat_anc_visits = mat_anc,
+    mat_anc_provider = NA_character_,
+    mat_hiv_status = mat_hiv,
+    mat_syphilis = mat_syp,
+    mat_height = NA_real_,
+    mat_weight = NA_real_,
+    mat_bmi = NA_real_,
+    mat_muac = NA_real_,
+    mat_sbp = NA_real_,
+    mat_dbp = NA_real_,
+    mat_hypertension = mat_hyp,           # ★ v10.9: from q37bp
+    mat_preeclampsia = NA_character_,
+    mat_delivery_mode = del_mode,
+    mat_delivery_location = mat_del_loc,  # ★ v10.9: from q2ref (referral status)
+    mat_birth_attendant = NA_character_,
+    mat_prolonged_labour = NA_character_,
+    mat_obstructed_labour = NA_character_,
+    mat_prom = NA_character_,
+    
+    # ---- Section 3: Household socioeconomic indicators ----
+    # Not collected in ALERT - all placeholders
+    hh_ppi_score = NA_real_,
+    hh_ppi_band = NA_character_,
+    hh_poverty_likelihood = NA_real_,
+    hh_wealth_quintile = NA_character_,
+    hh_ses_binary = NA_character_,
+    hh_wall_material = NA_character_,
+    hh_floor_material = NA_character_,
+    hh_ownership = NA_character_,
+    hh_num_rooms = NA_real_,
+    hh_cooking_fuel = NA_character_,
+    hh_heating_fuel = NA_character_,
+    hh_lighting = NA_character_,
+    hh_electricity = NA_character_,
+    hh_water_source = NA_character_,
+    hh_sanitation = NA_character_,
+    hh_hygiene = NA_character_,
+    hh_mosquito_net = NA_character_,
+    hh_size = NA_real_,
+    hh_monthly_income = NA_real_,
+    
+    # ---- Location ----
+    loc_country = mat_country_parsed,
+    loc_region = NA_character_,
+    loc_district = NA_character_,
+    loc_facility = facility,
+    loc_village = NA_character_,
+    loc_latitude = NA_real_,
+    loc_longitude = NA_real_,
+    loc_urban_rural = NA_character_,
+    loc_facility_type = NA_character_
+  )
+  
+  # ============================================================================
+  # DERIVE DATE OF DEATH AND AGE AT DEATH
+  # ============================================================================
+  # q48dod is the date of discharge, referral, OR death for ALL live births.
+  # We must filter it so out_dod only contains actual death dates:
+  #   - For neonatal deaths (out_nnd == "Yes"): use parsed q48dod
+  #   - For stillbirths: out_dod = out_dob (death occurred at birth)
+  #   - For discharged/referred babies: out_dod = NA
+  result <- result %>%
+    mutate(
+      out_dod = case_when(
+        out_nnd == "Yes"        ~ out_dod,    # keep parsed q48dod only for NND
+        out_stillbirth == "Yes" ~ out_dob,    # stillbirth: death date = birth date
+        TRUE                    ~ as.Date(NA) # discharged/referred: not a death
+      ),
+      out_ageatdeath = case_when(
+        out_nnd == "Yes" & !is.na(out_dod) & !is.na(out_dob) ~
+          as.numeric(difftime(out_dod, out_dob, units = "days")),
+        out_stillbirth == "Yes" ~ 0,          # stillbirths: age at death = 0 days
+        TRUE ~ NA_real_
+      ),
+      # Safety: age at death must be non-negative and plausible (0-28 days for NND)
+      out_ageatdeath = ifelse(
+        out_nnd == "Yes" & !is.na(out_ageatdeath) &
+          (out_ageatdeath < 0 | out_ageatdeath > 28),
+        NA_real_, out_ageatdeath
+      )
+    )
+  
+  result %>% derive_outcomes() %>% ensure_complete_schema()
+}
+```
+
+## 2.3 PRECISE Harmonization
+
+```{r phase2-precise}
+harmonize_precise <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(tibble() %>% ensure_complete_schema())
+  
+  # ===========================================================================
+  # PRE-PROCESSING: Handle .dta import (haven_labelled variables)
+  # ===========================================================================
+  # When loading .dta files with haven::read_dta(), categorical variables are
+  # stored as haven_labelled (numeric with value labels). We decode them to
+  # get the actual text values. Continuous numeric variables (age, weight,
+  # GA, etc.) are NOT labelled in Stata, so they remain numeric after this step.
+  
+  if (requireNamespace("haven", quietly = TRUE)) {
+    df <- df %>% mutate(across(
+      where(~inherits(.x, "haven_labelled")),
+      ~tryCatch(as.character(haven::as_factor(.x)),
+                error = function(e) as.character(.x))
+    ))
+  }
+  
+  # Normalize column names to lowercase for consistent matching
+  names(df) <- tolower(names(df))
+  
+  # Trim whitespace from all character columns (PRECISE has leading spaces
+  # in some values, e.g. deliverylocation = " District hospital")
+  df <- df %>% mutate(across(where(is.character), str_trim))
+  
+  n <- nrow(df)
+  
+  # ===========================================================================
+  # LOCAL HELPER: Robust Yes/No conversion
+  # ===========================================================================
+  # Handles: "Yes"/"No" strings, "1"/"0" strings, numeric 1/0, and
+  # haven-decoded labels. Covers both .dta and .csv input formats.
+  robust_yesno <- function(x) {
+    x_chr <- str_trim(as.character(x))
+    case_when(
+      tolower(x_chr) %in% c("yes", "1", "true") ~ "Yes",
+      tolower(x_chr) %in% c("no", "0", "false")  ~ "No",
+      tolower(x_chr) %in% c("don't know", "unknown", "99", "na", "") ~ NA_character_,
+      TRUE ~ NA_character_
+    )
+  }
+  
+  # ===========================================================================
+  # PRE-COMPUTE: COUNTRY
+  # ===========================================================================
+  # PRECISE data dictionary: country is string ("Kenya", "Mozambique", "The Gambia")
+  # In .dta it may be numeric; Stata code uses: 1=Kenya, 2=Mozambique, 3=The Gambia
+  country_raw <- get_col_chr(df, "country")
+  
+  mat_country_parsed <- case_when(
+    # String matching (priority - handles decoded labels and CSV strings)
+    str_detect(tolower(country_raw), "gambia")                ~ "The Gambia",
+    str_detect(tolower(country_raw), "kenya")                 ~ "Kenya",
+    str_detect(tolower(country_raw), "mozambique|mo.ambique") ~ "Mozambique",
+    # Numeric fallback (Stata encoding)
+    safe_numeric(country_raw) == 1 ~ "Kenya",
+    safe_numeric(country_raw) == 2 ~ "Mozambique",
+    safe_numeric(country_raw) == 3 ~ "The Gambia",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: DELIVERY MODE (using ALERT-style dual-mode helpers)
+  # ===========================================================================
+  # PRECISE data dictionary (f9_mode_of_delivery / delivery_mode):
+  #   1=Unassisted vaginal without episiotomy, 2=Unassisted vaginal with episiotomy,
+  #   3=Operative vaginal, 4=Vaginal breech, 5=Resuscitative hysterotomy (CS),
+  #   6=None (mother died undelivered), 7=Caesarean section, 99=Don't know
+  #
+  # ISSUE: In .dta files, this variable may be:
+  #   (a) haven_labelled → decoded to text by pre-processing → pattern matching works
+  #   (b) plain numeric (no labels) → pre-processing skips it → need numeric matching
+  #   (c) named f9_mode_of_delivery instead of delivery_mode in some .dta versions
+  
+  # Dual-mode helpers (same as ALERT fix)
+# Dual-mode helpers - prefixed to avoid shadowing global safe_num
+  precise_safe_num <- function(x) {
+    if (is.null(x)) return(rep(NA_real_, n))
+    if (inherits(x, "haven_labelled")) return(as.numeric(unclass(x)))
+    suppressWarnings(as.numeric(as.character(x)))
+  }
+  
+  precise_safe_lbl <- function(x) {
+    if (is.null(x)) return(rep(NA_character_, n))
+    if (inherits(x, "haven_labelled")) {
+      tryCatch(as.character(haven::as_factor(x)),
+               error = function(e) as.character(x))
+    } else {
+      as.character(x)
+    }
+  }
+  
+  precise_match_any <- function(x, nums = NULL, patterns = NULL) {
+    x_num <- precise_safe_num(x)
+    x_chr <- tolower(precise_safe_lbl(x))
+    result <- rep(FALSE, length(x))
+    if (!is.null(nums)) {
+      result <- result | (x_num %in% nums & !is.na(x_num))
+    }
+    if (!is.null(patterns)) {
+      for (p in patterns) {
+        matched <- grepl(p, x_chr, ignore.case = TRUE)
+        matched[is.na(matched)] <- FALSE
+        result <- result | matched
+      }
+    }
+    result
+  }
+  
+  # --- Gather all three possible source columns ---
+  dm_raw  <- get_col(df, "delivery_mode")
+  dm_fb   <- get_col(df, "mode")
+  dm_fb2  <- get_col(df, "f9_mode_of_delivery")  # REDCap raw variable name
+  
+  # --- Extract numeric codes (works for plain numeric OR decoded-to-string "7") ---
+  dm_num  <- safe_numeric(as.character(dm_raw))
+  dm_num2 <- safe_numeric(as.character(dm_fb))
+  dm_num3 <- safe_numeric(as.character(dm_fb2))
+  dm_num_best <- coalesce(dm_num, dm_num2, dm_num3)
+  
+  delivery_mode_std <- case_when(
+    # --- Priority 1: Direct numeric code matching (handles .dta without labels) ---
+    dm_num_best %in% c(5, 7)        ~ "Caesarean",
+    dm_num_best == 3                 ~ "Vaginal assisted",
+    dm_num_best %in% c(1, 2, 4)     ~ "Vaginal",
+    dm_num_best == 6                 ~ NA_character_,    # Mother died undelivered
+    dm_num_best == 99                ~ NA_character_,    # Don't know
+    
+    # --- Priority 2: Pattern matching on primary (delivery_mode) ---
+    precise_match_any(dm_raw, patterns = c("caesarean", "c-section", "c.section",
+                                            "hysterotomy")) ~ "Caesarean",
+    precise_match_any(dm_raw, patterns = c("operative", "vacuum", "forcep",
+                                            "instrumental")) ~ "Vaginal assisted",
+    precise_match_any(dm_raw, patterns = c("vaginal", "breech", "unassist",
+                                            "cephalic", "spontaneous",
+                                            "svd")) ~ "Vaginal",
+    
+    # --- Priority 3: Pattern matching on fallback (mode) ---
+    precise_match_any(dm_fb, patterns = c("caesarean", "c-section", "c.section",
+                                           "hysterotomy")) ~ "Caesarean",
+    precise_match_any(dm_fb, patterns = c("operative", "vacuum", "forcep",
+                                           "instrumental")) ~ "Vaginal assisted",
+    precise_match_any(dm_fb, patterns = c("vaginal", "breech", "unassist",
+                                           "cephalic", "spontaneous",
+                                           "svd")) ~ "Vaginal",
+    
+    # --- Priority 4: Pattern matching on f9_mode_of_delivery ---
+    precise_match_any(dm_fb2, patterns = c("caesarean", "c-section", "c.section",
+                                            "hysterotomy")) ~ "Caesarean",
+    precise_match_any(dm_fb2, patterns = c("operative", "vacuum", "forcep",
+                                            "instrumental")) ~ "Vaginal assisted",
+    precise_match_any(dm_fb2, patterns = c("vaginal", "breech", "unassist",
+                                            "cephalic", "spontaneous",
+                                            "svd")) ~ "Vaginal",
+    
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: INFANT SEX
+  # ===========================================================================
+  # Data dictionary (f9_baby_sex / f9_sex_of_the_baby): 1=Male, 2=Female, 3=Indeterminate
+  # Primary: sex_of_baby; fallback: sex
+  sex_primary  <- get_col_chr(df, "sex_of_baby")
+  sex_fallback <- get_col_chr(df, "sex")
+  sex_raw <- ifelse(is.na(sex_primary) | sex_primary == "", sex_fallback, sex_primary)
+  
+  sex_std <- case_when(
+    # String matching
+    str_detect(tolower(sex_raw), "^m|\\bmale\\b") &
+      !str_detect(tolower(sex_raw), "female")         ~ "Male",
+    str_detect(tolower(sex_raw), "^f|female")          ~ "Female",
+    str_detect(tolower(sex_raw), "indeterminate|ambiguous") ~ "Indeterminate",
+    # Numeric fallback
+    safe_numeric(sex_raw) == 1 ~ "Male",
+    safe_numeric(sex_raw) == 2 ~ "Female",
+    safe_numeric(sex_raw) == 3 ~ "Indeterminate",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: SGA / LGA
+  # ===========================================================================
+  # PRECISE sga variable uses full text descriptions:
+  #   "Small for Gestational Age (<10th centile)"
+  #   "Appropriate for Gestational Age (10th to 90th centile)"
+  #   "Large for Gestational Age (>90th centile)"
+  sga_raw <- get_col_chr(df, "sga")
+  
+  sga_std <- case_when(
+    str_detect(tolower(sga_raw), "small")                ~ "Yes",
+    str_detect(tolower(sga_raw), "appropriate|large")    ~ "No",
+    tolower(sga_raw) %in% c("yes", "1")                 ~ "Yes",
+    tolower(sga_raw) %in% c("no", "0")                  ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  lga_std <- case_when(
+    str_detect(tolower(sga_raw), "large")                ~ "Yes",
+    str_detect(tolower(sga_raw), "small|appropriate")    ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: MULTIPLE BIRTH
+  # ===========================================================================
+  mult_raw <- get_col_chr(df, "delivery_num_of_babies")
+  
+  multiple_std <- case_when(
+    str_detect(tolower(mult_raw), "multiple|twin|triplet") ~ "Yes",
+    str_detect(tolower(mult_raw), "singleton|single")      ~ "No",
+    safe_numeric(mult_raw) == 1  ~ "No",
+    safe_numeric(mult_raw) >= 2  ~ "Yes",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: LIVE BIRTH (with bornalive fallback)
+  # ===========================================================================
+  lb_primary  <- robust_yesno(get_col(df, "livebirth"))
+  lb_fallback <- robust_yesno(get_col(df, "bornalive"))
+  livebirth_std <- ifelse(!is.na(lb_primary), lb_primary, lb_fallback)
+  
+  # ===========================================================================
+  # PRE-COMPUTE: BIRTH WEIGHT (ensure grams, use bwt_kg as fallback)
+  # ===========================================================================
+  bw_raw <- get_col_num(df, "birthweight")
+  bw_kg  <- get_col_num(df, "bwt_kg")
+  bw_grams <- case_when(
+    !is.na(bw_raw) & bw_raw >= 100 ~ bw_raw,         # Already in grams
+    !is.na(bw_raw) & bw_raw < 10   ~ bw_raw * 1000,  # In kg, convert
+    !is.na(bw_kg)                   ~ bw_kg * 1000,   # Fallback
+    TRUE ~ NA_real_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: GESTATIONAL AGE (GA_PRECISE + GA_clinical fallback)
+  # ===========================================================================
+  ga_primary  <- get_col_num(df, "ga_precise")
+  ga_clinical <- get_col_num(df, "ga_clinical")
+  ga_weeks <- ifelse(!is.na(ga_primary), ga_primary, ga_clinical)
+  
+  ga_days_raw <- get_col_num(df, "ga_precise_days")
+  ga_days <- ifelse(!is.na(ga_days_raw), ga_days_raw,
+                    ifelse(!is.na(ga_weeks), round(ga_weeks * 7), NA_real_))
+
+  # ===========================================================================
+  # PRE-COMPUTE: GA METHOD (from GA_PRECISE_code)
+  # Values: Ultrasound GA_CRL_FL_HC, LMP GA, Tracer GA, Ultrasound GA_ORIGINAL_EDD, SFH GA
+  # ===========================================================================
+  # safe_decode not needed here: haven_labelled columns already decoded (lines 1566-1571)
+  # and column names lowercased (line 1575)
+  ga_code_raw <- get_col_chr(df, "ga_precise_code")
+  ga_method <- case_when(
+    str_detect(ga_code_raw, "(?i)ultrasound") ~ "Ultrasound",
+    str_detect(ga_code_raw, "(?i)^LMP")       ~ "LMP",
+    str_detect(ga_code_raw, "(?i)tracer")     ~ "Tracer",
+    str_detect(ga_code_raw, "(?i)^SFH")       ~ "SFH",
+    !is.na(ga_clinical) & is.na(ga_primary)   ~ "Clinical estimate",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: MATERNAL AGE (age_enrolment + age_edd fallback)
+  # ===========================================================================
+  age_primary  <- get_col_num(df, "age_enrolment")
+  age_fallback <- get_col_num(df, "age_edd")
+  mat_age_final <- ifelse(!is.na(age_primary), age_primary, age_fallback)
+  
+  # ===========================================================================
+  # PRE-COMPUTE: DELIVERY LOCATION
+  # ===========================================================================
+  # Data dictionary (f7_delivery_location):
+  #   1=Home, 2=PHC, 3=District hospital, 4=Regional hospital,
+  #   5=Tertiary hospital, 6=Private hospital/clinic, 7=En route,
+  #   90=Other, 99=Don't know
+  loc_raw      <- get_col_chr(df, "deliverylocation")
+  loc_fallback <- get_col_chr(df, "deliloc")
+  
+  delivery_loc_std <- case_when(
+    # String matching
+    str_detect(tolower(loc_raw), "tertiary")                  ~ "Tertiary hospital",
+    str_detect(tolower(loc_raw), "regional")                  ~ "Regional hospital",
+    str_detect(tolower(loc_raw), "district")                  ~ "District hospital",
+    str_detect(tolower(loc_raw), "phc|primary|health cent")   ~ "PHC",
+    str_detect(tolower(loc_raw), "private")                   ~ "Private hospital/clinic",
+    str_detect(tolower(loc_raw), "home")                      ~ "Home",
+    str_detect(tolower(loc_raw), "en route|transit")          ~ "En route",
+    str_detect(tolower(loc_raw), "other")                     ~ "Other",
+    str_detect(tolower(loc_raw), "don.*know|unknown")         ~ NA_character_,
+    # Numeric fallback (data dictionary codes)
+    safe_numeric(loc_raw) == 1  ~ "Home",
+    safe_numeric(loc_raw) == 2  ~ "PHC",
+    safe_numeric(loc_raw) == 3  ~ "District hospital",
+    safe_numeric(loc_raw) == 4  ~ "Regional hospital",
+    safe_numeric(loc_raw) == 5  ~ "Tertiary hospital",
+    safe_numeric(loc_raw) == 6  ~ "Private hospital/clinic",
+    safe_numeric(loc_raw) == 7  ~ "En route",
+    safe_numeric(loc_raw) == 90 ~ "Other",
+    safe_numeric(loc_raw) == 99 ~ NA_character_,
+    # Fallback to deliloc if primary is missing
+    !is.na(loc_fallback) & str_detect(tolower(loc_fallback), "phc|hospital") ~ "Hospital/PHC",
+    !is.na(loc_fallback) & str_detect(tolower(loc_fallback), "outside|home")  ~ "Home/En route",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: MARITAL STATUS
+  # ===========================================================================
+  # Data dictionary (f3_marital_status):
+  #   1=Never married (or single), 2=Co-habiting, 3=Currently married (only wife),
+  #   4=Currently married (one of 2+ wives), 5=Separated, 6=Divorced, 7=Widowed
+  ms_raw <- get_col_chr(df, "marital_status")
+  
+  marital_std <- case_when(
+    str_detect(tolower(ms_raw), "married|co.?habit")         ~ "Married/Cohabiting",
+    str_detect(tolower(ms_raw), "never|single")              ~ "Single",
+    str_detect(tolower(ms_raw), "divorced|separated")        ~ "Divorced/Separated",
+    str_detect(tolower(ms_raw), "widow")                     ~ "Widowed",
+    safe_numeric(ms_raw) %in% c(2, 3, 4) ~ "Married/Cohabiting",
+    safe_numeric(ms_raw) == 1             ~ "Single",
+    safe_numeric(ms_raw) %in% c(5, 6)    ~ "Divorced/Separated",
+    safe_numeric(ms_raw) == 7             ~ "Widowed",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: EDUCATION
+  # ===========================================================================
+  # Data dictionary (f3_highest_school_level):
+  #   1=None, 2=Primary, 3=Secondary, 4=Higher
+  edu_raw <- get_col_chr(df, "highest_school_level")
+  
+  education_std <- case_when(
+    str_detect(tolower(edu_raw), "none|never|no school")                ~ "None",
+    str_detect(tolower(edu_raw), "primary")                             ~ "Primary",
+    str_detect(tolower(edu_raw), "secondary")                           ~ "Secondary",
+    str_detect(tolower(edu_raw), "higher|university|college|tertiary")  ~ "Higher",
+    # Numeric fallback (PRECISE data dictionary codes - NOT 0-indexed!)
+    safe_numeric(edu_raw) == 1 ~ "None",
+    safe_numeric(edu_raw) == 2 ~ "Primary",
+    safe_numeric(edu_raw) == 3 ~ "Secondary",
+    safe_numeric(edu_raw) == 4 ~ "Higher",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: RELIGION
+  # ===========================================================================
+  # Data dictionary (f3_religion):
+  #   1=Muslim, 2=Christian, 3=Traditional/spiritualist/animist,
+  #   4-13=Various other religions, 14=None, 90=Other
+  rel_raw <- get_col_chr(df, "religion")
+  
+  religion_std <- case_when(
+    str_detect(tolower(rel_raw), "christian|catholic|protest|pentecost|evangel") ~ "Christian",
+    str_detect(tolower(rel_raw), "muslim|islam")                                ~ "Muslim",
+    str_detect(tolower(rel_raw), "traditional|spiritual|animist")               ~ "Traditional",
+    str_detect(tolower(rel_raw), "none|no rel")                                 ~ "None",
+    str_detect(tolower(rel_raw), "other")                                       ~ "Other",
+    # Numeric fallback
+    safe_numeric(rel_raw) == 1              ~ "Muslim",
+    safe_numeric(rel_raw) == 2              ~ "Christian",
+    safe_numeric(rel_raw) == 3              ~ "Traditional",
+    safe_numeric(rel_raw) == 14             ~ "None",
+    safe_numeric(rel_raw) == 90             ~ "Other",
+    safe_numeric(rel_raw) %in% c(4:13)     ~ "Other",
+    !is.na(rel_raw) & rel_raw != ""        ~ rel_raw,
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: OCCUPATION
+  # ===========================================================================
+  # Data dictionary (f3_occupation):
+  #   1=Housewife, 2=Student, 3=Professional, 4=Factory, 5=Large-scale agriculture,
+  #   6=Market trader, 7=Construction, 90=Other
+  # Primary: occupation; fallback: f3_occupation
+  occ_raw      <- get_col_chr(df, "occupation")
+  occ_fallback <- get_col_chr(df, "f3_occupation")
+  occ_combined <- ifelse(is.na(occ_raw) | occ_raw == "", occ_fallback, occ_raw)
+  
+  occupation_std <- case_when(
+    str_detect(tolower(occ_combined), "professional|formal")                ~ "Employed",
+    str_detect(tolower(occ_combined), "informal|self|business|trader|market") ~ "Self-employed",
+    str_detect(tolower(occ_combined), "housewife|unemploy|none|home")       ~ "Unemployed/Housewife",
+    str_detect(tolower(occ_combined), "student")                           ~ "Student",
+    str_detect(tolower(occ_combined), "farmer|agric|factory|construction") ~ "Manual/Agricultural",
+    str_detect(tolower(occ_combined), "other")                             ~ "Other",
+    # Numeric fallback
+    safe_numeric(occ_combined) == 1              ~ "Unemployed/Housewife",
+    safe_numeric(occ_combined) == 2              ~ "Student",
+    safe_numeric(occ_combined) == 3              ~ "Employed",
+    safe_numeric(occ_combined) %in% c(4, 5, 7)  ~ "Manual/Agricultural",
+    safe_numeric(occ_combined) == 6              ~ "Self-employed",
+    safe_numeric(occ_combined) == 90             ~ "Other",
+    !is.na(occ_combined) & occ_combined != ""    ~ occ_combined,
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: URBAN/RURAL
+  # ===========================================================================
+  ur_raw <- get_col_chr(df, "rural_urban_index")
+  
+  urban_rural_std <- case_when(
+    str_detect(tolower(ur_raw), "peri")                                     ~ "Peri-urban",
+    str_detect(tolower(ur_raw), "urban") & !str_detect(tolower(ur_raw), "peri") ~ "Urban",
+    str_detect(tolower(ur_raw), "rural")                                    ~ "Rural",
+    safe_numeric(ur_raw) == 1 ~ "Urban",
+    safe_numeric(ur_raw) == 2 ~ "Peri-urban",
+    safe_numeric(ur_raw) == 3 ~ "Rural",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # PRE-COMPUTE: HIV STATUS
+  # ===========================================================================
+  hiv_raw <- get_col_chr(df, "hiv_status")
+  
+  hiv_std <- case_when(
+    tolower(hiv_raw) %in% c("yes", "positive", "reactive", "1") ~ "Positive",
+    tolower(hiv_raw) %in% c("no", "negative", "non-reactive", "0") ~ "Negative",
+    str_detect(tolower(hiv_raw), "unknown|don.*know|not tested") ~ "Unknown",
+    safe_numeric(hiv_raw) == 1  ~ "Positive",
+    safe_numeric(hiv_raw) == 0  ~ "Negative",
+    safe_numeric(hiv_raw) == 99 ~ "Unknown",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # ★ v10.9: PRE-COMPUTE BIRTH ATTENDANT
+  # ===========================================================================
+  # PRECISE has multiple delivery_attendant_ columns (doctor, midwife, nurse, etc.)
+  # Derive primary attendant based on hierarchy: Doctor > Midwife > Nurse > Other
+  att_doctor  <- tolower(trimws(get_col_chr(df, "delivery_attendant_doctor")))
+  att_midwife <- tolower(trimws(get_col_chr(df, "delivery_attendant_midwife")))
+  att_nurse   <- tolower(trimws(get_col_chr(df, "delivery_attendant_nurse")))
+  att_hw      <- tolower(trimws(get_col_chr(df, "delivery_attendant_health_worker")))
+  att_tba     <- tolower(trimws(get_col_chr(df, "deliveryattendant_birthattendant")))
+  att_family  <- tolower(trimws(get_col_chr(df, "delivery_attendant_family")))
+  
+  birth_attendant_std <- case_when(
+    att_doctor == "yes"  ~ "Doctor",
+    att_midwife == "yes" ~ "Midwife",
+    att_nurse == "yes"   ~ "Nurse",
+    att_hw == "yes"      ~ "Health worker",
+    att_tba == "yes"     ~ "TBA",
+    att_family == "yes"  ~ "Family member",
+    TRUE ~ NA_character_
+  )
+  
+  # ===========================================================================
+  # BUILD RESULT TIBBLE
+  # ===========================================================================
+  
+  result <- tibble(
+    # ===== IDENTIFIERS =====
+    unified_id       = paste0("PRECISE_", seq_len(n)),
+    study_source     = "PRECISE",
+    study_design     = "Facility-based",
+    module           = "Prospective cohort",
+    sample_weight    = NA_real_,
+    raw_id           = get_col_chr(df, "f2a_participant_id"),
+    raw_id_secondary = get_col_chr(df, "childid"),
+    
+    # ===== DATES =====
+    study_date        = parse_date_multi(get_col(df, "visit_date")),
+    studyyear         = as.integer(year(parse_date_multi(get_col(df, "delivery_date")))),
+    out_dob           = parse_date_multi(get_col(df, "delivery_date")),
+    yob               = as.integer(year(parse_date_multi(get_col(df, "delivery_date")))),
+    delivery_date_raw = parse_date_multi(get_col(df, "delivery_date")),
+    conception_date   = parse_date_multi(get_col(df, "conception_date")),
+    
+    # ===== SECTION 1: PRIMARY OUTCOME VARIABLES =====
+    out_stillbirth           = robust_yesno(get_col(df, "stillbirth")),
+    out_livebirth            = livebirth_std,
+    out_nnd                  = robust_yesno(get_col(df, "neonataldeath")),
+    out_fresh_stillbirth     = NA_character_,    # Not available in PRECISE analysis dataset
+    out_macerated_stillbirth = NA_character_,    # Not available in PRECISE analysis dataset
+    out_stillbirth_20wks     = NA_character_,    # Derived by derive_outcomes() from GA
+    out_stillbirth_28wks     = robust_yesno(get_col(df, "stillbirth28")),
+    out_preterm              = robust_yesno(get_col(df, "preterm")),
+    out_lbw                  = robust_yesno(get_col(df, "lowbirthweight")),
+    
+    out_ga_weeks           = ga_weeks,
+    out_ga_days            = ga_days,
+    out_ga_method          = ga_method,
+    out_birthweight_g      = bw_grams,
+    out_birthweight_centile = get_col_num(df, "bwt_percentile"),
+    out_birthweight_zscore  = get_col_num(df, "bwt_zscore"),
+    out_infant_sex         = sex_std,
+    out_apgar_1min         = get_col_num(df, "apgarscore_1min"),
+    out_apgar_5min         = get_col_num(df, "apgarscore_5min"),
+    out_apgar_10min        = NA_real_,           # Not available in PRECISE
+    out_sga                = sga_std,
+    out_lga                = lga_std,
+    out_dod                = parse_date_multi(get_col(df, "baby_death_date")),
+    out_ageatdeath         = get_col_num(df, "ageatdeath"),
+    out_multiple           = multiple_std,
+    
+    # ===== SECTION 2: MATERNAL DEMOGRAPHICS =====
+    mat_age                = mat_age_final,
+    mat_marital_status     = marital_std,
+    mat_religion           = religion_std,
+    mat_education          = education_std,
+    mat_literacy           = NA_character_,       # Not available in PRECISE
+    mat_occupation         = occupation_std,
+    mat_ethnicity          = get_col_chr(df, "ethnicity"),
+    mat_country            = mat_country_parsed,
+    mat_facility           = get_col_chr(df, "health_facility"),
+    mat_district           = NA_character_,       # Not available in PRECISE
+    mat_urban_rural        = urban_rural_std,
+    mat_gravidity          = NA_real_,            # Not directly available in PRECISE
+    mat_parity             = if ("parity" %in% names(df)) suppressWarnings(as.numeric(as.character(df[["parity"]]))) else get_col_num(df, "parity"),
+    mat_previous_cs        = robust_yesno(get_col(df, "previous_csection")),
+    mat_previous_stillbirth = robust_yesno(get_col(df, "previous_stillbirth")),
+    mat_anc_visits         = get_col_num(df, "f7_antenatal_care_number_of_visi"),
+    mat_anc_provider       = NA_character_,       # Not available in PRECISE
+    mat_hiv_status         = hiv_std,
+    mat_syphilis           = NA_character_,       # Not available in PRECISE
+    mat_height             = get_col_num(df, "maternal_height"),
+    mat_weight             = get_col_num(df, "maternal_weight"),
+    mat_bmi                = get_col_num(df, "maternal_bmi"),
+    mat_muac               = get_col_num(df, "average_muac"),
+    mat_sbp                = get_col_num(df, "average_sbp"),
+    mat_dbp                = get_col_num(df, "average_dbp"),
+    mat_hypertension       = robust_yesno(get_col(df, "ht_overall")),
+    mat_preeclampsia       = robust_yesno(get_col(df, "pe_overall")),
+    mat_delivery_mode      = delivery_mode_std,
+    mat_delivery_location  = delivery_loc_std,
+    mat_birth_attendant    = birth_attendant_std,  # ★ v10.9: from delivery_attendant columns
+    mat_prolonged_labour   = NA_character_,       # prolonged_labour is numeric (hours), not Yes/No
+    mat_obstructed_labour  = NA_character_,       # Not available in PRECISE
+    mat_prom               = NA_character_,       # Not available in PRECISE
+    
+    # ===== SECTION 3: HOUSEHOLD SOCIOECONOMIC INDICATORS =====
+    hh_ppi_score          = get_col_num(df, "ppi_score"),
+    hh_ppi_band           = NA_character_,
+    hh_poverty_likelihood = get_col_num(df, "extreme_poverty_line"),
+    # hh_wealth_quintile: from merged PRECISE_SES file (wealth_quintile column)
+    # PRECISE uses PCA-based xtile: 1=Poorest (lowest asset score) to 5=Wealthiest
+    hh_wealth_quintile    = {
+      wq <- get_col_num(df, "wealth_quintile")
+      case_when(
+        wq == 1 ~ "1 - Poorest",
+        wq == 2 ~ "2 - Poor",
+        wq == 3 ~ "3 - Middle class",
+        wq == 4 ~ "4 - Wealthy",
+        wq == 5 ~ "5 - Wealthiest",
+        TRUE ~ NA_character_
+      )
+    },
+    hh_ses_binary         = NA_character_,
+    hh_wall_material      = NA_character_,        # Not collected in PRECISE
+    hh_floor_material     = NA_character_,        # Not collected in PRECISE
+    hh_ownership          = NA_character_,        # Not collected in PRECISE
+    hh_num_rooms          = NA_real_,             # Not collected in PRECISE
+    hh_cooking_fuel       = get_col_chr(df, "cooking"),
+    hh_heating_fuel       = get_col_chr(df, "heating"),
+    hh_lighting           = get_col_chr(df, "lighting"),
+    hh_electricity        = NA_character_,        # Not directly collected in PRECISE
+    hh_water_source       = get_col_chr(df, "water_jmp"),
+    hh_sanitation         = get_col_chr(df, "sanitation_jmp"),
+    hh_hygiene            = get_col_chr(df, "hygiene_jmp"),
+    hh_mosquito_net       = NA_character_,        # Not collected in PRECISE
+    hh_size               = NA_real_,             # Not collected in PRECISE
+    hh_monthly_income     = NA_real_,             # Not collected in PRECISE
+    
+    # ===== LOCATION VARIABLES =====
+    loc_country       = mat_country_parsed,
+    loc_region        = NA_character_,
+    loc_district      = NA_character_,
+    loc_facility      = get_col_chr(df, "health_facility"),
+    loc_village       = get_col_chr(df, "village"),
+    loc_latitude      = get_col_num(df, "villagelat"),
+    loc_longitude     = get_col_num(df, "villagelong"),
+    loc_urban_rural   = urban_rural_std,
+    loc_facility_type = NA_character_
+  )
+  
+  # ============================================================================
+  # POST-PROCESSING: Add mat_age_cat from mat_age
+  # ============================================================================
+  result <- result %>%
+    mutate(
+      mat_age_cat = case_when(
+        is.na(mat_age) ~ NA_character_,
+        mat_age < 20 ~ "<20",
+        mat_age >= 20 & mat_age < 25 ~ "20-24",
+        mat_age >= 25 & mat_age < 30 ~ "25-29",
+        mat_age >= 30 & mat_age < 35 ~ "30-34",
+        mat_age >= 35 ~ "35+",
+        TRUE ~ NA_character_
+      )
+    )
+  
+  result %>% derive_outcomes() %>% ensure_complete_schema()
+}
+```
+
+## 2.4 PTBi Harmonization
+
+```{r phase2-ptbi}
+harmonize_ptbi <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(tibble() %>% ensure_complete_schema())
+  
+  # ===========================================================================
+  # PRE-PROCESSING: Handle .dta import (haven_labelled variables)
+  # ===========================================================================
+  # When loading .dta files with haven::read_dta(), categorical variables are
+
+  # stored as haven_labelled (numeric with value labels). We must decode them
+  # BEFORE any string pattern matching. Continuous numeric variables (age, weight,
+  # GA, apgar scores) are NOT labelled in Stata, so they stay numeric.
+  #
+  # Without this step, str_detect() sees "1" or "2" instead of "Born_Alive" 
+  # or "Still_Birth", causing massive missing data.
+  # ===========================================================================
+  
+  if (requireNamespace("haven", quietly = TRUE)) {
+    df <- df %>% mutate(across(
+      where(~inherits(.x, "haven_labelled")),
+      ~tryCatch(as.character(haven::as_factor(.x)),
+                error = function(e) as.character(.x))
+    ))
+  }
+  
+  # Normalize column names to lowercase for consistent matching
+  names(df) <- tolower(names(df))
+  
+  # Trim whitespace from all character columns
+  df <- df %>% mutate(across(where(is.character), ~trimws(as.character(.x))))
+  
+  n <- nrow(df)
+  
+  # ===========================================================================
+  # LOCAL HELPERS: Robust extraction for mixed CSV / .dta input
+  # ===========================================================================
+  
+  # Safe column extraction (returns NA vector if column missing)
+  safe_col <- function(col_name) {
+    if (col_name %in% names(df)) df[[col_name]] else rep(NA, n)
+  }
+  
+  # Safe numeric extraction (handles labelled, character, and numeric)
+  safe_num <- function(col_name) {
+    x <- safe_col(col_name)
+    if (is.null(x)) return(rep(NA_real_, n))
+    suppressWarnings(as.numeric(as.character(x)))
+  }
+  
+  # Safe character extraction (already decoded by pre-processing step above)
+  safe_chr <- function(col_name) {
+    x <- safe_col(col_name)
+    if (is.null(x)) return(rep(NA_character_, n))
+    as.character(x)
+  }
+  
+  # Lowercased character for pattern matching
+  safe_chr_lower <- function(col_name) {
+    tolower(safe_chr(col_name))
+  }
+  
+  # Robust Yes/No from mixed 0/1 numeric and "yes"/"no"/"Yes"/"No" strings
+  as_yesno_robust <- function(x) {
+    x_chr <- tolower(trimws(as.character(x)))
+    case_when(
+      is.na(x) | x_chr %in% c("", "na", "nan") ~ NA_character_,
+      x_chr %in% c("1", "yes", "y", "true") ~ "Yes",
+      x_chr %in% c("0", "no", "n", "false") ~ "No",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  # ===========================================================================
+  # EXTRACT RAW VARIABLES (decoded from haven_labelled by pre-processing)
+  # ===========================================================================
+  
+  # Primary outcome variables (all decoded to character strings)
+  birth_outcome_raw  <- safe_chr_lower("c_birth_outcome")
+  baby_status_raw    <- safe_chr_lower("c_baby_status")
+  baby_discharge_raw <- safe_chr_lower("baby_discharge_status")
+  mother_status_raw  <- safe_chr_lower("c_mother_status")
+  mother_disch_raw   <- safe_chr_lower("mother_discharge_status")
+  mode_raw           <- safe_chr_lower("mode_of_delivery")
+  c_mode_raw         <- safe_chr_lower("c_mode_of_delivery")
+  sex_raw            <- safe_chr_lower("sex")
+  referral_raw       <- safe_chr_lower("referral_in")
+  record_type_raw    <- safe_chr_lower("record_type")
+  final_diag_raw     <- safe_chr_lower("final_diagnosis")
+  
+  # Numeric variables
+  ga_num             <- safe_num("ga")
+  bw_kg              <- safe_num("birth_weight")
+  bw_g2              <- safe_num("c_birth_weight_g2")
+  age_raw            <- safe_num("mothers_age")
+  age_c              <- safe_num("c_mothers_age")
+  apgar1_raw         <- safe_num("apgar_1")
+  apgar5_raw         <- safe_num("apgar_5")
+  apgar10_raw        <- safe_num("apgar_10")
+  multiple_raw       <- safe_num("multiple")
+  
+  # Final diagnosis binary flags (0/1 numeric)
+  diag_hbp           <- safe_num("finaldiag_high_blood_pressure_in")
+  diag_obstructed    <- safe_num("finaldiag_obstructed_labour")
+  diag_malaria       <- safe_num("finaldiag_malaria_in_pregnancy")
+  diag_anaemia       <- safe_num("finaldiag_anaemia_in_pregnancy")
+  diag_hiv           <- safe_num("finaldiag_hiv_aids")
+  diag_sepsis        <- safe_num("finaldiag_puerperal_sepsis")
+  diag_uti           <- safe_num("finaldiag_urinary_tract_infectio")
+  diag_pph           <- safe_num("finaldiag_pph")
+  diag_aph           <- safe_num("finaldiag_aph")
+  diag_ruptured      <- safe_num("finaldiag_ruptured_uterus")
+  diag_preterm       <- safe_num("finaldiag_preterm")
+  bba_flag           <- safe_num("bba")
+  doc_iufd_flag      <- safe_num("doc_iufd")
+  
+  # Date variables - use c_date_of_delivery (100% complete) as PRIMARY
+  # date_of_delivery only ~77% complete
+  date_primary       <- safe_chr("c_date_of_delivery")
+  date_secondary     <- safe_chr("date_of_delivery")
+  date_admission     <- safe_chr("admission_date")
+  date_discharge     <- safe_chr("discharge_date")
+  
+  # ===========================================================================
+  # PARSE DATES: Use c_date_of_delivery (100%) with date_of_delivery fallback
+  # ===========================================================================
+  dob_parsed   <- parse_date_multi(date_primary)
+  dob_fallback <- parse_date_multi(date_secondary)
+  dob_final    <- coalesce(dob_parsed, dob_fallback)
+  
+  adm_parsed   <- parse_date_multi(date_admission)
+  disch_parsed <- parse_date_multi(date_discharge)
+  
+  # ===========================================================================
+  # BIRTH WEIGHT: Use c_birth_weight_g2 (grams, 73%) as primary
+  # birth_weight is in KG (e.g., 3.0 = 3000g), use as fallback with conversion
+  # ===========================================================================
+  bw_from_g2 <- ifelse(!is.na(bw_g2) & bw_g2 > 0 & bw_g2 <= 7000, bw_g2, NA_real_)
+  bw_from_kg <- case_when(
+    !is.na(bw_kg) & bw_kg >= 0.3 & bw_kg <= 7.0  ~ bw_kg * 1000,
+    !is.na(bw_kg) & bw_kg >= 300  & bw_kg <= 7000 ~ bw_kg,
+    TRUE ~ NA_real_
+  )
+  bw_final <- coalesce(bw_from_g2, bw_from_kg)
+  
+  # ===========================================================================
+  # MATERNAL AGE: Use mothers_age with c_mothers_age fallback
+  # ===========================================================================
+  mat_age_final <- coalesce(age_raw, age_c)
+  mat_age_final <- ifelse(!is.na(mat_age_final) & mat_age_final >= 10 & mat_age_final <= 60,
+                          mat_age_final, NA_real_)
+  
+  # ===========================================================================
+  # GESTATIONAL AGE: Validate range
+  # ===========================================================================
+  ga_final <- ifelse(!is.na(ga_num) & ga_num > 0 & ga_num <= 45, ga_num, NA_real_)
+  
+  # ===========================================================================
+  # PARITY / GRAVIDITY: Check if available in .dta (PTBi maternity form 
+  # collects them but CSV sample does not have them; .dta may)
+  # ===========================================================================
+  parity_raw    <- safe_num("parity")
+  gravidity_raw <- safe_num("gravidity")
+  # Try alternative column names that might exist in production .dta
+  if (all(is.na(parity_raw)))    parity_raw    <- safe_num("para")
+  if (all(is.na(gravidity_raw))) gravidity_raw <- safe_num("gravida")
+  # number_of_children_alive might serve as proxy
+  n_children_alive <- safe_num("number_of_children_alive")
+  if (all(is.na(n_children_alive))) n_children_alive <- safe_num("children_alive")
+  
+  # ===========================================================================
+  # EDUCATION / RELIGION / MARITAL STATUS / OCCUPATION / ETHNICITY:
+  # These are collected on the PTBi maternity form but may not be in the
+  # electronic dataset. We check for possible column names in .dta.
+  # ===========================================================================
+  education_raw <- safe_chr_lower("education")
+  if (all(is.na(education_raw) | education_raw == "")) {
+    education_raw <- safe_chr_lower("mat_education")
+  }
+  if (all(is.na(education_raw) | education_raw == "")) {
+    education_raw <- safe_chr_lower("education_level")
+  }
+  
+  religion_raw <- safe_chr_lower("religion")
+  if (all(is.na(religion_raw) | religion_raw == "")) {
+    religion_raw <- safe_chr_lower("mat_religion")
+  }
+  
+  marital_raw <- safe_chr_lower("marital_status")
+  if (all(is.na(marital_raw) | marital_raw == "")) {
+    marital_raw <- safe_chr_lower("marital")
+  }
+  
+  occupation_raw <- safe_chr_lower("occupation")
+  if (all(is.na(occupation_raw) | occupation_raw == "")) {
+    occupation_raw <- safe_chr_lower("mat_occupation")
+  }
+  
+  ethnicity_raw <- safe_chr_lower("tribe")
+  if (all(is.na(ethnicity_raw) | ethnicity_raw == "")) {
+    ethnicity_raw <- safe_chr_lower("ethnicity")
+  }
+  
+  district_raw <- safe_chr("district")
+  if (all(is.na(district_raw) | district_raw == "")) {
+    district_raw <- safe_chr("mother_s_district_of_residence")
+  }
+  if (all(is.na(district_raw) | district_raw == "")) {
+    district_raw <- safe_chr("mat_district")
+  }
+  
+  # Previous C-section: check for column
+  prev_cs_raw <- safe_num("previous_csection")
+  if (all(is.na(prev_cs_raw))) prev_cs_raw <- safe_num("prev_cs")
+  
+  # Previous stillbirth
+  prev_sb_raw <- safe_chr_lower("previous_stillbirth")
+  if (all(is.na(prev_sb_raw) | prev_sb_raw == "")) {
+    prev_sb_raw <- safe_chr_lower("prev_stillbirth")
+  }
+  
+  # ANC visits
+  anc_raw <- safe_num("anc_visits")
+  if (all(is.na(anc_raw))) anc_raw <- safe_num("number_of_anc_visits")
+  if (all(is.na(anc_raw))) anc_raw <- safe_num("anc_attendance")
+  
+  # HIV status from dedicated column (fallback to finaldiag flag)
+  hiv_raw <- safe_chr_lower("hiv_status")
+  if (all(is.na(hiv_raw) | hiv_raw == "")) {
+    hiv_raw <- safe_chr_lower("hiv")
+  }
+  
+  # ===========================================================================
+  # BUILD RESULT TIBBLE
+  # ===========================================================================
+  
+  result <- tibble(
+    # =========================================================================
+    # IDENTIFIERS
+    # =========================================================================
+    unified_id       = paste0("PTBi_", seq_len(n)),
+    study_source     = "PTBi",
+    study_design     = "Facility-based",
+    module           = "Facility birth registry",
+    sample_weight    = NA_real_,
+    raw_id           = as.character(safe_num("id")),
+    raw_id_secondary = safe_chr("mother_id"),
+    
+    # =========================================================================
+    # DATES
+    # =========================================================================
+    study_date       = coalesce(adm_parsed, dob_final),
+    studyyear        = as.integer(year(coalesce(dob_final, adm_parsed))),
+    out_dob          = dob_final,
+    yob              = as.integer(year(dob_final)),
+    delivery_date_raw = dob_final,
+    conception_date  = as.Date(NA),
+    
+    # =========================================================================
+    # SECTION 1: PRIMARY OUTCOME VARIABLES
+    # =========================================================================
+    
+    # --- Stillbirth (any) ---
+    # PRIMARY: c_birth_outcome (100% complete): "Still_Birth" / "Born_Alive"
+    # FALLBACK: c_baby_status, baby_discharge_status, doc_iufd
+    out_stillbirth = case_when(
+      str_detect(birth_outcome_raw, "still")          ~ "Yes",
+      str_detect(birth_outcome_raw, "alive|born_al")  ~ "No",
+      str_detect(baby_status_raw, "still")             ~ "Yes",
+      str_detect(baby_status_raw, "live|undoc")        ~ "No",
+      str_detect(baby_discharge_raw, "still")          ~ "Yes",
+      str_detect(baby_discharge_raw, "live|discharged_alive|baby_born|defect") ~ "No",
+      doc_iufd_flag == 1                               ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Live birth ---
+    out_livebirth = case_when(
+      str_detect(birth_outcome_raw, "alive|born_al")   ~ "Yes",
+      str_detect(birth_outcome_raw, "still")           ~ "No",
+      str_detect(baby_status_raw, "live|undoc|neonatal_death|immediate") ~ "Yes",
+      str_detect(baby_status_raw, "still")             ~ "No",
+      str_detect(baby_discharge_raw, "live|discharged_alive|baby_born|defect|neonatal_death|immediate") ~ "Yes",
+      str_detect(baby_discharge_raw, "still")          ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Fresh stillbirth ---
+    # c_baby_status and baby_discharge_status distinguish fresh vs macerated
+    out_fresh_stillbirth = case_when(
+      str_detect(baby_status_raw, "fresh_still") | 
+        str_detect(baby_discharge_raw, "fresh_still")  ~ "Yes",
+      str_detect(birth_outcome_raw, "alive|born_al")   ~ "No",
+      str_detect(baby_status_raw, "live|undoc")        ~ "No",
+      str_detect(baby_status_raw, "macerat") | 
+        str_detect(baby_discharge_raw, "macerat")      ~ "No",
+      str_detect(baby_status_raw, "unknown_still")     ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Macerated stillbirth ---
+    out_macerated_stillbirth = case_when(
+      str_detect(baby_status_raw, "macerat") | 
+        str_detect(baby_discharge_raw, "macerat")      ~ "Yes",
+      str_detect(birth_outcome_raw, "alive|born_al")   ~ "No",
+      str_detect(baby_status_raw, "live|undoc")        ~ "No",
+      str_detect(baby_status_raw, "fresh_still") | 
+        str_detect(baby_discharge_raw, "fresh_still")  ~ "No",
+      str_detect(baby_status_raw, "unknown_still")     ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Stillbirth by GA thresholds (derived in post-processing below) ---
+    out_stillbirth_20wks = NA_character_,
+    out_stillbirth_28wks = NA_character_,
+    
+    # --- Neonatal death ---
+    # c_baby_status: "Immediate_Neonatal_Death" indicates NND
+    # baby_discharge_status: "Immediate_Neonatal_Death"
+    # Only applicable if livebirth
+    out_nnd = case_when(
+      str_detect(birth_outcome_raw, "still")           ~ NA_character_,
+      str_detect(baby_status_raw, "still")             ~ NA_character_,
+      str_detect(baby_status_raw, "neonatal_death|immediate_neonatal") ~ "Yes",
+      str_detect(baby_discharge_raw, "neonatal_death|immediate_neonatal") ~ "Yes",
+      str_detect(baby_status_raw, "live_baby") & 
+        str_detect(baby_discharge_raw, "live_baby|discharged_alive") ~ "No",
+      str_detect(baby_status_raw, "live_baby")         ~ "No",
+      str_detect(baby_discharge_raw, "live_baby|discharged_alive|baby_born|defect") ~ "No",
+      str_detect(baby_status_raw, "undocumented")      ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Gestational age ---
+    out_ga_weeks = ga_final,
+    out_ga_days  = ifelse(!is.na(ga_final), ga_final * 7, NA_real_),
+    out_ga_method = "Clinical estimate (facility registry)",
+    
+    # --- Birth weight (grams) ---
+    out_birthweight_g       = bw_final,
+    out_birthweight_centile = NA_real_,
+    out_birthweight_zscore  = NA_real_,
+    
+    # --- Infant sex ---
+    out_infant_sex = case_when(
+      str_detect(sex_raw, "^male$|^m$")   ~ "Male",
+      str_detect(sex_raw, "^female$|^f$") ~ "Female",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Apgar scores ---
+    out_apgar_1min  = ifelse(!is.na(apgar1_raw) & apgar1_raw >= 0 & apgar1_raw <= 10,
+                             apgar1_raw, NA_real_),
+    out_apgar_5min  = ifelse(!is.na(apgar5_raw) & apgar5_raw >= 0 & apgar5_raw <= 10,
+                             apgar5_raw, NA_real_),
+    out_apgar_10min = ifelse(!is.na(apgar10_raw) & apgar10_raw >= 0 & apgar10_raw <= 10,
+                             apgar10_raw, NA_real_),
+    
+    # --- SGA/LGA (requires gigs R package post-processing) ---
+    out_sga = NA_character_,
+    out_lga = NA_character_,
+    
+    # --- Date/age at death ---
+    out_dod        = as.Date(NA),
+    out_ageatdeath = NA_real_,
+    
+    # --- Multiple birth ---
+    # CRITICAL FIX: `multiple` is the NUMBER of babies (1=singleton, 2=twins, 3=triplets)
+    # NOT a 0/1 indicator! Previous code had multiple==1 -> "Yes" which was WRONG.
+    out_multiple = case_when(
+      !is.na(multiple_raw) & multiple_raw >= 2 ~ "Yes",
+      !is.na(multiple_raw) & multiple_raw == 1 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # =========================================================================
+    # SECTION 2: MATERNAL DEMOGRAPHICS
+    # =========================================================================
+    
+    # --- Maternal age ---
+    mat_age = mat_age_final,
+    
+    # --- Maternal age category ---
+    mat_age_cat = case_when(
+      is.na(mat_age_final)       ~ NA_character_,
+      mat_age_final < 20         ~ "<20",
+      mat_age_final <= 24        ~ "20-24",
+      mat_age_final <= 29        ~ "25-29",
+      mat_age_final <= 34        ~ "30-34",
+      mat_age_final >= 35        ~ "35+",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Marital status ---
+    # Check if column exists in .dta (not in CSV sample)
+    mat_marital_status = case_when(
+      is.na(marital_raw) | marital_raw == "" ~ NA_character_,
+      str_detect(marital_raw, "married|cohabit|living") ~ "Married/Cohabiting",
+      str_detect(marital_raw, "single|never")           ~ "Single",
+      str_detect(marital_raw, "divorced|separated")     ~ "Divorced/Separated",
+      str_detect(marital_raw, "widow")                  ~ "Widowed",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Religion ---
+    mat_religion = case_when(
+      is.na(religion_raw) | religion_raw == "" ~ NA_character_,
+      str_detect(religion_raw, "christian|catholic|protestant|anglican|pentecostal|sda|adventist|born.again|baptist|orthodox") ~ "Christian",
+      str_detect(religion_raw, "muslim|islam")          ~ "Muslim",
+      str_detect(religion_raw, "traditional|ancestral") ~ "Traditional",
+      str_detect(religion_raw, "none|no.religion|atheist") ~ "None",
+      str_detect(religion_raw, "other")                 ~ "Other",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Education ---
+    mat_education = case_when(
+      is.na(education_raw) | education_raw == "" ~ NA_character_,
+      str_detect(education_raw, "no.education|none|never|no school") ~ "None",
+      str_detect(education_raw, "primary|p[1-7]|grade\\s*[1-7]")    ~ "Primary",
+      str_detect(education_raw, "a.level|tertiary|univ|college|degree|diploma|higher") ~ "Higher",
+      str_detect(education_raw, "secondary|o.level|s[1-6]")         ~ "Secondary",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Literacy ---
+    mat_literacy = NA_character_,
+    
+    # --- Occupation ---
+    mat_occupation = case_when(
+      is.na(occupation_raw) | occupation_raw == "" ~ NA_character_,
+      str_detect(occupation_raw, "employed|salaried|professional|formal|civil") ~ "Employed",
+      str_detect(occupation_raw, "self|business|trader|farmer|peasant|fishing")   ~ "Self-employed",
+      str_detect(occupation_raw, "unemployed|housewife|not employed|none|house.?wife") ~ "Unemployed",
+      str_detect(occupation_raw, "student")                                        ~ "Student",
+      TRUE ~ "Other"
+    ),
+    
+    # --- Ethnicity ---
+    mat_ethnicity = case_when(
+      is.na(ethnicity_raw) | ethnicity_raw == "" ~ NA_character_,
+      TRUE ~ str_to_title(ethnicity_raw)
+    ),
+    
+    # --- Country (always Uganda for PTBi) ---
+    mat_country = coalesce(safe_chr("country"), "Uganda"),
+    
+    # --- Facility ---
+    mat_facility = safe_chr("facility"),
+    
+    # --- District ---
+    mat_district = case_when(
+      !is.na(district_raw) & district_raw != "" ~ district_raw,
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Urban/Rural ---
+    mat_urban_rural = NA_character_,
+    
+    # --- Gravidity (may be in .dta but not CSV sample) ---
+    mat_gravidity = ifelse(!is.na(gravidity_raw) & gravidity_raw >= 1 & gravidity_raw <= 20,
+                           gravidity_raw, NA_real_),
+    
+    # --- Parity (may be in .dta but not CSV sample) ---
+    mat_parity = ifelse(!is.na(parity_raw) & parity_raw >= 0 & parity_raw <= 15,
+                        parity_raw, NA_real_),
+    
+    # --- Previous C-section ---
+    mat_previous_cs = ifelse(!is.na(prev_cs_raw), prev_cs_raw, NA_real_),
+    
+    # --- Previous stillbirth ---
+    mat_previous_stillbirth = case_when(
+      !is.na(prev_sb_raw) & prev_sb_raw != "" ~ as_yesno_robust(prev_sb_raw),
+      TRUE ~ NA_character_
+    ),
+    
+    # --- ANC visits ---
+    mat_anc_visits    = ifelse(!is.na(anc_raw) & anc_raw >= 0 & anc_raw <= 20,
+                               anc_raw, NA_real_),
+    mat_anc_provider  = NA_character_,
+    
+    # --- HIV status ---
+    # Use dedicated column if available; fallback to finaldiag_HIV_AIDS flag
+    mat_hiv_status = case_when(
+      !is.na(hiv_raw) & hiv_raw != "" & str_detect(hiv_raw, "pos")     ~ "Positive",
+      !is.na(hiv_raw) & hiv_raw != "" & str_detect(hiv_raw, "neg")     ~ "Negative",
+      diag_hiv == 1                                                     ~ "Positive",
+      diag_hiv == 0                                                     ~ NA_character_,
+      str_detect(final_diag_raw, "hiv")                                 ~ "Positive",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Syphilis ---
+    mat_syphilis = NA_character_,
+    
+    # --- Anthropometry (not available in PTBi electronic dataset) ---
+    mat_height = NA_real_,
+    mat_weight = NA_real_,
+    mat_bmi    = NA_real_,
+    mat_muac   = NA_real_,
+    mat_sbp    = NA_real_,
+    mat_dbp    = NA_real_,
+    
+    # --- Hypertension (from final_diagnosis flags) ---
+    mat_hypertension = case_when(
+      diag_hbp == 1 ~ "Yes",
+      diag_hbp == 0 ~ "No",
+      str_detect(final_diag_raw, "high.blood.pressure|hypertens|hbp") ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Preeclampsia ---
+    mat_preeclampsia = case_when(
+      str_detect(final_diag_raw, "pre.?eclampsia|preeclampsia") ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Delivery mode ---
+    # PRIMARY: mode_of_delivery (76.5%), FALLBACK: c_mode_of_delivery
+    mat_delivery_mode = case_when(
+      str_detect(mode_raw, "normal_vaginal|vaginal_delivery|spontaneous_vaginal|svd") ~ "Vaginal",
+      str_detect(mode_raw, "caesarean|c.section|c_section|cs$")                       ~ "Caesarean",
+      str_detect(mode_raw, "vacuum|ventouse|forceps|instrumental")                    ~ "Vaginal assisted",
+      str_detect(mode_raw, "born_before_arrival|bba")                                 ~ "Vaginal",
+      str_detect(mode_raw, "breech")                                                  ~ "Vaginal",
+      str_detect(mode_raw, "laparotomy")                                              ~ "Caesarean",
+      # Fallback to c_mode_of_delivery
+      str_detect(c_mode_raw, "vaginal")                  ~ "Vaginal",
+      str_detect(c_mode_raw, "caesarean|c.section")      ~ "Caesarean",
+      str_detect(c_mode_raw, "born_before_arrival|bba")  ~ "Vaginal",
+      str_detect(c_mode_raw, "other")                    ~ "Other",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Delivery location ---
+    # PTBi is facility-based, but bba flag indicates born before arrival
+    mat_delivery_location = case_when(
+      bba_flag == 1                                      ~ "En route/BBA",
+      !is.na(safe_chr("facility")) & safe_chr("facility") != "" ~ "Hospital",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- Birth attendant ---
+    mat_birth_attendant = NA_character_,
+    
+    # --- Prolonged labour ---
+    mat_prolonged_labour = NA_character_,
+    
+    # --- Obstructed labour (from finaldiag flags and text) ---
+    mat_obstructed_labour = case_when(
+      diag_obstructed == 1 ~ "Yes",
+      diag_obstructed == 0 ~ "No",
+      str_detect(final_diag_raw, "obstruct") ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    
+    # --- PROM ---
+    mat_prom = NA_character_,
+    
+    # =========================================================================
+    # SECTION 3: HOUSEHOLD SOCIOECONOMIC INDICATORS
+    # =========================================================================
+    # PTBi has LOW household wealth data availability per data mapping.
+    # These fields are mostly not captured electronically. Leave as NA.
+    
+    hh_ppi_score         = NA_real_,
+    hh_ppi_band          = NA_character_,
+    hh_poverty_likelihood = NA_real_,
+    hh_wealth_quintile   = NA_character_,
+    hh_ses_binary        = NA_character_,
+    hh_wall_material     = NA_character_,
+    hh_floor_material    = NA_character_,
+    hh_ownership         = NA_character_,
+    hh_num_rooms         = NA_real_,
+    hh_cooking_fuel      = NA_character_,
+    hh_heating_fuel      = NA_character_,
+    hh_lighting          = NA_character_,
+    hh_electricity       = NA_character_,
+    hh_water_source      = NA_character_,
+    hh_sanitation        = NA_character_,
+    hh_hygiene           = NA_character_,
+    hh_mosquito_net      = NA_character_,
+    hh_size              = NA_real_,
+    hh_monthly_income    = NA_real_,
+    
+    # =========================================================================
+    # LOCATION VARIABLES
+    # =========================================================================
+    loc_country       = coalesce(safe_chr("country"), "Uganda"),
+    loc_region        = NA_character_,
+    loc_district      = case_when(
+      !is.na(district_raw) & district_raw != "" ~ district_raw,
+      TRUE ~ NA_character_
+    ),
+    loc_facility      = safe_chr("facility"),
+    loc_village       = NA_character_,
+    loc_latitude      = NA_real_,
+    loc_longitude     = NA_real_,
+    loc_urban_rural   = NA_character_,
+    loc_facility_type = NA_character_
+  )
+  
+  # ===========================================================================
+  # POST-PROCESSING: Derive GA-based stillbirth thresholds
+  # ===========================================================================
+  result <- result %>%
+    mutate(
+      # Stillbirth >= 20 weeks
+      out_stillbirth_20wks = case_when(
+        out_stillbirth == "Yes" & !is.na(out_ga_weeks) & out_ga_weeks >= 20 ~ "Yes",
+        out_stillbirth == "No"  ~ "No",
+        out_stillbirth == "Yes" & !is.na(out_ga_weeks) & out_ga_weeks < 20  ~ "No",
+        TRUE ~ NA_character_
+      ),
+      # Stillbirth >= 28 weeks (WHO late fetal death)
+      out_stillbirth_28wks = case_when(
+        out_stillbirth == "Yes" & !is.na(out_ga_weeks) & out_ga_weeks >= 28 ~ "Yes",
+        out_stillbirth == "No"  ~ "No",
+        out_stillbirth == "Yes" & !is.na(out_ga_weeks) & out_ga_weeks < 28  ~ "No",
+        # Birthweight criterion: >= 1000g if GA missing
+        out_stillbirth == "Yes" & is.na(out_ga_weeks) & 
+          !is.na(out_birthweight_g) & out_birthweight_g >= 1000 ~ "Yes",
+        TRUE ~ NA_character_
+      ),
+      
+      # Age at death from discharge date minus DOB (for NNDs)
+      out_ageatdeath = case_when(
+        out_nnd == "Yes" & !is.na(disch_parsed) & !is.na(out_dob) & disch_parsed > out_dob ~
+          as.numeric(disch_parsed - out_dob),
+        TRUE ~ out_ageatdeath
+      ),
+      
+      # If age at death > 28 days, reclassify as not NND
+      out_nnd = case_when(
+        !is.na(out_ageatdeath) & out_ageatdeath > 28 ~ "No",
+        TRUE ~ out_nnd
+      ),
+      
+      # Set DOD for neonatal deaths
+      out_dod = case_when(
+        out_nnd == "Yes" & !is.na(disch_parsed) ~ disch_parsed,
+        TRUE ~ out_dod
+      )
+    )
+  
+  # ===========================================================================
+  # APPLY derive_outcomes() AND ensure_complete_schema()
+  # ===========================================================================
+  result %>% derive_outcomes() %>% ensure_complete_schema()
+}
+```
+
+## 2.5 EN-INDEPTH Harmonization
+
+```{r phase2-enindepth}
+harmonize_enindepth <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(tibble() %>% ensure_complete_schema())
+  
+  n <- nrow(df)
+  
+  # ════════════════════════════════════════════════════════════════════════════
+  # HELPER FUNCTIONS for .dta (haven_labelled) vs CSV (string) compatibility
+  # ════════════════════════════════════════════════════════════════════════════
+  # When loading .dta files via haven::read_dta(), categorical variables are
+  # stored as haven_labelled objects (numeric with value labels). CSV files
+  # store these as plain strings. These helpers handle BOTH formats seamlessly.
+  
+  # Decode haven_labelled to character labels; pass-through for strings
+  safe_decode <- function(x) {
+    if (is.null(x)) return(rep(NA_character_, n))
+    if (inherits(x, "haven_labelled")) {
+      decoded <- tryCatch(
+        as.character(haven::as_factor(x)),
+        error = function(e) as.character(x)
+      )
+    } else {
+      decoded <- as.character(x)
+    }
+    # Standardise known missing codes to NA
+    decoded[decoded %in% c("", "-999999999", ".a", ".i", ".b", ".z",
+                           "NA", "NaN", "MISSING", "missing")] <- NA_character_
+    return(decoded)
+  }
+  
+  # Extract underlying numeric value; strip haven labels if present
+  safe_num <- function(x) {
+    if (is.null(x)) return(rep(NA_real_, n))
+    if (inherits(x, "haven_labelled")) return(as.numeric(x))
+    suppressWarnings(as.numeric(as.character(x)))
+  }
+  
+  # ════════════════════════════════════════════════════════════════════════════
+  # PRE-DECODE ALL KEY VARIABLES
+  # This ensures correct matching regardless of file format (.dta or .csv)
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  # ── Country & Location ──
+  country_dec <- tolower(safe_decode(get_col(df, "country")))
+  hdss_dec    <- tolower(safe_decode(get_col(df, "hdss")))
+  
+  # ── Data Collection Module ──
+  # EN-INDEPTH randomized women to two modules: "Birth Hx" vs "Pregnancy Hx"
+  # This mirrors the DHS birth history vs pregnancy history distinction
+  # "Pregnancy Hx" captures stillbirths directly; "Birth Hx" captures only live births
+  module_raw <- safe_decode(get_col(df, "module"))
+  
+  # ── Primary Outcomes (Section 1) ──
+  sb_num         <- safe_num(get_col(df, "sb"))              # 0/1 binary
+  nnd_num        <- safe_num(get_col(df, "nnd"))             # 0/1 binary
+  neonataldeath_num <- safe_num(get_col(df, "neonataldeath"))# 0/1 (may have NAs)
+  livebirths_num <- safe_num(get_col(df, "livebirths"))      # 0/1 binary
+  
+  # alivedead: In .dta likely numeric (1=YES/alive, 2=NO/dead); in CSV string
+  alivedead_dec  <- toupper(safe_decode(get_col(df, "alivedead")))
+  alivedead_num  <- safe_num(get_col(df, "alivedead"))
+  
+  # p212B: In .dta numeric (1=BORN ALIVE, 2=BORN DEAD, 3=PREGNANCY ENDED BEFORE FULL TERM)
+  p212B_dec      <- toupper(safe_decode(get_col(df, "p212B")))
+  p212B_num      <- safe_num(get_col(df, "p212B"))
+  
+  # type: derived variable ("Livebirths", "Stillbirths")
+  type_dec       <- tolower(safe_decode(get_col(df, "type")))
+  
+  # ── Infant Characteristics ──
+  # gender: In .dta numeric (1=BOY, 2=GIRL); in CSV string
+  gender_dec     <- toupper(safe_decode(get_col(df, "gender")))
+  gender_num     <- safe_num(get_col(df, "gender"))
+  
+  # sing_mult: In .dta possibly numeric; in CSV "YES"/"NO"/"DON'T KNOW"
+  # YES = multiple birth; NO = singleton
+  sing_mult_dec  <- toupper(safe_decode(get_col(df, "sing_mult")))
+  sing_mult_num  <- safe_num(get_col(df, "sing_mult"))
+  
+  # gestation1 = months for livebirths; gestation2 = months for pregnancy losses/stillbirths
+  # They are mutually exclusive — coalesce picks whichever is available
+  ga_months      <- coalesce(
+      safe_num(get_col(df, "gestation1")),
+      safe_num(get_col(df, "gestation2"))
+  )
+  
+  # ── Maternal Demographics (Section 2) ──
+  # education: In .dta numeric (0=None, 1=Primary, 2=Secondary, 3=Higher)
+  # In CSV: "No education", "Primary only", "Primary & secondary", "Higher"
+  education_dec  <- safe_decode(get_col(df, "education"))
+  education_num  <- safe_num(get_col(df, "education"))
+  
+  # religion: In .dta may be haven_labelled; in CSV string
+  religion_dec   <- safe_decode(get_col(df, "religion"))
+  
+  # Intq108: Marital status (used in production Stata code for respondent marital status)
+  # In .dta numeric (1=Currently married, 2=Living with, 3=Widowed,
+  #                  4=Divorced, 5=Separated, 6=Never married)
+  # In CSV: String values
+  intq108_dec    <- toupper(safe_decode(get_col(df, "Intq108")))
+  intq108_num    <- safe_num(get_col(df, "Intq108"))
+  
+  # q107_combined: "Ever attended school or Madrasa" (YES/NO) 
+  # Can serve as fallback for marital status (YES ≈ ever married) per mapping doc
+  q107_dec       <- toupper(safe_decode(get_col(df, "q107_combined")))
+  q107_num       <- safe_num(get_col(df, "q107_combined"))
+  
+  # q111: Literacy variable
+  # In .dta may be numeric; in CSV: "CANNOT READ AT ALL", "ABLE TO READ WHOLE SENTENCE", etc.
+  q111_dec       <- toupper(safe_decode(get_col(df, "q111")))
+  
+  # ── Parity & Gravidity ──
+  # N_gravidity: actual count of total pregnancies (0-13+) — USE THIS
+  # gravidity: binary flag (0/1) only — DON'T USE as primary
+  n_gravidity    <- safe_num(get_col(df, "N_gravidity"))
+  grav_binary    <- safe_num(get_col(df, "gravidity"))
+  
+  # tot_brpr: Total births in study period — parity ≈ tot_brpr - 1
+  tot_brpr_num   <- safe_num(get_col(df, "tot_brpr"))
+  
+  # parity: categorical string ("3+", "<2") — only as last resort
+  parity_dec     <- safe_decode(get_col(df, "parity"))
+  
+  # ── Household (Section 3) ──
+  ses_dec        <- safe_decode(get_col(df, "ses"))
+  
+  # ════════════════════════════════════════════════════════════════════════════
+  # COUNTRY PARSING (handles both string labels and numeric codes)
+  # ════════════════════════════════════════════════════════════════════════════
+  mat_country_parsed <- case_when(
+    str_detect(country_dec, "uganda|iganga") | str_detect(hdss_dec, "iganga") ~ "Uganda",
+    str_detect(country_dec, "bangladesh|matlab") | str_detect(hdss_dec, "matlab") ~ "Bangladesh",
+    str_detect(country_dec, "ethiopia|dabat") | str_detect(hdss_dec, "dabat") ~ "Ethiopia",
+    str_detect(country_dec, "ghana|kintampo") | str_detect(hdss_dec, "kintampo") ~ "Ghana",
+    str_detect(country_dec, "guinea|bissau|bandim") | str_detect(hdss_dec, "bandim") ~ "Guinea-Bissau",
+    TRUE ~ NA_character_
+  )
+  
+  # ════════════════════════════════════════════════════════════════════════════
+  # GESTATIONAL AGE: Convert months → weeks
+  # gestation1 in EN-INDEPTH is recorded in months (6-11)
+  # Using 4.345 weeks/month (365.25/12/7) for accurate conversion
+  # ════════════════════════════════════════════════════════════════════════════
+  ga_weeks <- case_when(
+    !is.na(ga_months) & ga_months >= 1 & ga_months <= 12 ~ round(ga_months * 4.345, 1),
+    TRUE ~ NA_real_
+  )
+  
+  # ════════════════════════════════════════════════════════════════════════════
+  # PARITY: Compute numeric parity from tot_brpr
+  # tot_brpr = total births including index → parity = tot_brpr - 1
+  # ════════════════════════════════════════════════════════════════════════════
+  mat_parity_computed <- case_when(
+    !is.na(tot_brpr_num) & tot_brpr_num >= 1 ~ tot_brpr_num - 1,
+    !is.na(tot_brpr_num) & tot_brpr_num == 0 ~ 0,
+    TRUE ~ NA_real_
+  )
+  
+  # ════════════════════════════════════════════════════════════════════════════
+  # ★ v10.9: CONSTRUCT DOB FROM COMPONENTS (yob, mob, dob)
+  # EN-INDEPTH stores birth date as separate year, month, day components
+  # ════════════════════════════════════════════════════════════════════════════
+  yob_val <- safe_num(get_col(df, "yob"))
+  dob_day <- safe_num(get_col(df, "dob"))  # day of birth (1-31)
+  mob_raw <- toupper(safe_decode(get_col(df, "mob")))  # month of birth (e.g., "JUNE")
+  
+  # Convert month name to number
+  mob_num <- case_when(
+    str_detect(mob_raw, "JAN") ~ 1L,
+    str_detect(mob_raw, "FEB") ~ 2L,
+    str_detect(mob_raw, "MAR") ~ 3L,
+    str_detect(mob_raw, "APR") ~ 4L,
+    str_detect(mob_raw, "MAY") ~ 5L,
+    str_detect(mob_raw, "JUN") ~ 6L,
+    str_detect(mob_raw, "JUL") ~ 7L,
+    str_detect(mob_raw, "AUG") ~ 8L,
+    str_detect(mob_raw, "SEP") ~ 9L,
+    str_detect(mob_raw, "OCT") ~ 10L,
+    str_detect(mob_raw, "NOV") ~ 11L,
+    str_detect(mob_raw, "DEC") ~ 12L,
+    TRUE ~ NA_integer_
+  )
+  
+  # Construct date from components (only if all components valid)
+  dob_constructed <- suppressWarnings(
+    as.Date(ifelse(
+      !is.na(yob_val) & !is.na(mob_num) & !is.na(dob_day) &
+        yob_val >= 1990 & yob_val <= 2025 &
+        dob_day >= 1 & dob_day <= 31,
+      paste(yob_val, mob_num, dob_day, sep = "-"),
+      NA_character_
+    ), format = "%Y-%m-%d")
+  )
+  
+  # ════════════════════════════════════════════════════════════════════════════
+  # ★ v10.9: CONSTRUCT DOD FROM COMPONENTS (yod, mod, dod)
+  # ════════════════════════════════════════════════════════════════════════════
+  yod_val <- safe_num(get_col(df, "yod"))
+  dod_day <- safe_num(get_col(df, "dod"))  # day of death
+  mod_raw <- toupper(safe_decode(get_col(df, "mod")))  # month of death
+  
+  mod_num <- case_when(
+    str_detect(mod_raw, "JAN") ~ 1L,
+    str_detect(mod_raw, "FEB") ~ 2L,
+    str_detect(mod_raw, "MAR") ~ 3L,
+    str_detect(mod_raw, "APR") ~ 4L,
+    str_detect(mod_raw, "MAY") ~ 5L,
+    str_detect(mod_raw, "JUN") ~ 6L,
+    str_detect(mod_raw, "JUL") ~ 7L,
+    str_detect(mod_raw, "AUG") ~ 8L,
+    str_detect(mod_raw, "SEP") ~ 9L,
+    str_detect(mod_raw, "OCT") ~ 10L,
+    str_detect(mod_raw, "NOV") ~ 11L,
+    str_detect(mod_raw, "DEC") ~ 12L,
+    TRUE ~ NA_integer_
+  )
+  
+  dod_constructed <- suppressWarnings(
+    as.Date(ifelse(
+      !is.na(yod_val) & !is.na(mod_num) & !is.na(dod_day) &
+        yod_val >= 1990 & yod_val <= 2025 &
+        dod_day >= 1 & dod_day <= 31,
+      paste(yod_val, mod_num, dod_day, sep = "-"),
+      NA_character_
+    ), format = "%Y-%m-%d")
+  )
+  
+  # ════════════════════════════════════════════════════════════════════════════
+  # BUILD HARMONIZED TIBBLE
+  # ════════════════════════════════════════════════════════════════════════════
+  
+  result <- tibble(
+    unified_id = paste0("ENINDEPTH_", seq_len(n)),
+    study_source = "EN-INDEPTH",
+    study_design     = "Population-based",
+    # Map raw EN-INDEPTH module: "Birth Hx" / "Pregnancy Hx" → harmonized values
+    module = case_when(
+      str_detect(module_raw, "(?i)pregnancy") ~ "HDSS pregnancy history",
+      str_detect(module_raw, "(?i)birth")     ~ "HDSS birth history",
+      TRUE                                    ~ "HDSS pregnancy surveillance"
+    ),
+    sample_weight    = NA_real_,
+    raw_id = get_col_chr(df, "Id"),
+    raw_id_secondary = get_col_chr(df, "interview__key"),
+    
+    study_date = parse_date_multi(get_col(df, "int_date")),
+    studyyear = coalesce(
+      safe_num(get_col(df, "yointerview")),
+      safe_num(get_col(df, "year"))
+    ),
+    # ★ v10.9: Use constructed DOB from yob/mob/dob components
+    out_dob = dob_constructed,
+    yob = safe_num(get_col(df, "yob")),
+    delivery_date_raw = dob_constructed,  # delivery date = DOB for EN-INDEPTH
+    conception_date = as.Date(NA),
+    
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 1: PRIMARY OUTCOMES
+    # ══════════════════════════════════════════════════════════════════════
+    
+    # Stillbirth: Primary source = sb (0/1); fallbacks = p212B, type
+    out_stillbirth = case_when(
+      sb_num == 1 ~ "Yes",
+      sb_num == 0 ~ "No",
+      # Fallback: p212B (1=BORN ALIVE, 2=BORN DEAD, 3=ENDED BEFORE TERM)
+      str_detect(p212B_dec, "BORN DEAD") | p212B_num == 2 ~ "Yes",
+      str_detect(p212B_dec, "BORN ALIVE") | p212B_num == 1 ~ "No",
+      # Fallback: type variable
+      str_detect(type_dec, "stillbirth") ~ "Yes",
+      str_detect(type_dec, "livebirth") ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # Live birth: Primary = sb inverted; fallbacks = livebirths, alivedead, p212B, type
+    out_livebirth = case_when(
+      sb_num == 0 ~ "Yes",
+      sb_num == 1 ~ "No",
+      livebirths_num == 1 ~ "Yes",
+      livebirths_num == 0 ~ "No",
+      # alivedead: In CSV "YES"/"NO"; in .dta numeric (1=YES, 2=NO)
+      str_detect(alivedead_dec, "^YES$") | alivedead_num == 1 ~ "Yes",
+      str_detect(alivedead_dec, "^NO$")  | alivedead_num == 2 ~ "No",
+      str_detect(p212B_dec, "BORN ALIVE") | p212B_num == 1 ~ "Yes",
+      str_detect(p212B_dec, "BORN DEAD")  | p212B_num == 2 ~ "No",
+      str_detect(type_dec, "livebirth") ~ "Yes",
+      str_detect(type_dec, "stillbirth") ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # Neonatal death: Primary = nnd; fallback = neonataldeath
+    # Only applicable to live births (stillbirths get NA)
+    out_nnd = case_when(
+      sb_num == 1 ~ NA_character_,
+      nnd_num == 1 | neonataldeath_num == 1 ~ "Yes",
+      nnd_num == 0 | neonataldeath_num == 0 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # Fresh stillbirth: p212B = BORN DEAD only (no macerated distinction in EN-INDEPTH)
+    out_fresh_stillbirth = case_when(
+      sb_num == 1 & (str_detect(p212B_dec, "BORN DEAD") | p212B_num == 2) ~ "Yes",
+      sb_num == 0 ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    out_macerated_stillbirth = NA_character_,
+    
+    # GA-based stillbirth classifications (derived after GA conversion)
+    out_stillbirth_20wks = case_when(
+      sb_num == 1 & !is.na(ga_weeks) & ga_weeks >= 20 ~ "Yes",
+      sb_num == 1 & !is.na(ga_weeks) & ga_weeks < 20  ~ "No",
+      sb_num == 0 ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    out_stillbirth_28wks = case_when(
+      sb_num == 1 & !is.na(ga_weeks) & ga_weeks >= 28 ~ "Yes",
+      sb_num == 1 & !is.na(ga_weeks) & ga_weeks < 28  ~ "No",
+      sb_num == 0 ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    
+    # Gestational age in WEEKS (converted from months × 4.345)
+    out_ga_weeks = ga_weeks,
+    out_ga_days = ga_weeks * 7,
+    out_ga_method = "Maternal recall",
+    
+    # Birthweight: Not available in EN-INDEPTH
+    out_birthweight_g = NA_real_,
+    out_birthweight_centile = NA_real_,
+    out_birthweight_zscore = NA_real_,
+    
+    # Infant sex: gender in .dta = numeric (1=BOY, 2=GIRL); in CSV = string
+    out_infant_sex = case_when(
+      str_detect(gender_dec, "BOY|MALE")   | gender_num == 1 ~ "Male",
+      str_detect(gender_dec, "GIRL|FEMALE") | gender_num == 2 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+    
+    # Apgar: Not available in EN-INDEPTH
+    out_apgar_1min = NA_real_,
+    out_apgar_5min = NA_real_,
+    out_apgar_10min = NA_real_,
+    out_sga = NA_character_,
+    out_lga = NA_character_,
+    # ★ v10.9: Use constructed DOD from yod/mod/dod components
+    out_dod = dod_constructed,
+    
+    # Age at death in days - use agedead_d if available, else compute from DOB/DOD
+    out_ageatdeath = coalesce(
+      safe_num(get_col(df, "agedead_d")),
+      as.numeric(difftime(dod_constructed, dob_constructed, units = "days"))
+    ),
+    
+    # Multiple birth: sing_mult YES = multiple birth; NO = singleton
+    # In .dta possibly numeric; in CSV string "YES"/"NO"/"DON'T KNOW"
+    out_multiple = case_when(
+      # String matching (works for both CSV and decoded .dta)
+      !is.na(sing_mult_dec) & str_detect(sing_mult_dec, "^YES$|MULTIPLE")  ~ "Yes",
+      !is.na(sing_mult_dec) & str_detect(sing_mult_dec, "^NO$|SINGLETON")  ~ "No",
+      !is.na(sing_mult_dec) & str_detect(sing_mult_dec, "DON.T KNOW")      ~ NA_character_,
+      # Numeric fallback if decode failed
+      is.na(sing_mult_dec) & sing_mult_num == 1 ~ "Yes",
+      is.na(sing_mult_dec) & (sing_mult_num == 0 | sing_mult_num == 2) ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 2: MATERNAL DEMOGRAPHICS
+    # ══════════════════════════════════════════════════════════════════════
+    
+    # Maternal age: coalesce womanage (computed from Gregorian calendar) and womanage2 (from CMC)
+    mat_age = coalesce(
+      safe_num(get_col(df, "womanage")),
+      safe_num(get_col(df, "womanage2"))
+    ),
+    
+    # Marital status from Intq108 (used in production Stata code)
+    # Numeric codes: 1=Currently married, 2=Living with, 3=Widowed,
+    #                4=Divorced, 5=Separated, 6=Never married
+    # -999999999 is missing code (already handled by safe_decode)
+    mat_marital_status = case_when(
+      # String matching (decoded labels from .dta or CSV strings)
+      str_detect(intq108_dec, "CURRENTLY MARRIED|LIVING WITH") ~ "Married/Cohabiting",
+      str_detect(intq108_dec, "NEVER MARRIED") ~ "Single",
+      str_detect(intq108_dec, "DIVORCED|SEPARATED") ~ "Divorced/Separated",
+      str_detect(intq108_dec, "WIDOWED") ~ "Widowed",
+      # Numeric fallback (for unlabelled .dta or edge cases)
+      intq108_num %in% c(1, 2) ~ "Married/Cohabiting",
+      intq108_num == 6 ~ "Single",
+      intq108_num %in% c(4, 5) ~ "Divorced/Separated",
+      intq108_num == 3 ~ "Widowed",
+      # Last resort: q107_combined (ever married YES/NO)
+      str_detect(q107_dec, "^YES$") | q107_num == 1 ~ "Married/Cohabiting",
+      str_detect(q107_dec, "^NO$")  | q107_num == 2 ~ "Single",
+      TRUE ~ NA_character_
+    ),
+    
+    # Religion: Standardise to Christian/Muslim/Traditional/Other-None
+    mat_religion = case_when(
+      str_detect(tolower(religion_dec), "christian|catholic|protestant|pentecostal|sda|adventist|anglican") ~ "Christian",
+      str_detect(tolower(religion_dec), "muslim|islam") ~ "Muslim",
+      str_detect(tolower(religion_dec), "traditional|ancestral") ~ "Traditional",
+      str_detect(tolower(religion_dec), "other|none") ~ "Other/None",
+      # Numeric fallback: common coding 1=Christian, 2=Muslim, 3=Traditional, 4=Other/None
+      !is.na(religion_dec) ~ religion_dec,   # pass through if no pattern matched but value exists
+      TRUE ~ NA_character_
+    ),
+    
+    # Education: In .dta numeric (0=None, 1=Primary, 2=Secondary, 3=Higher)
+    # In CSV: "No education", "Primary only", "Primary & secondary", "Higher"
+    mat_education = case_when(
+      str_detect(tolower(education_dec), "no educ|none") | (!is.na(education_num) & education_num == 0) ~ "None",
+      str_detect(tolower(education_dec), "primary only|^primary$") | (!is.na(education_num) & education_num == 1) ~ "Primary",
+      str_detect(tolower(education_dec), "secondary|primary.*secondary") | (!is.na(education_num) & education_num == 2) ~ "Secondary",
+      str_detect(tolower(education_dec), "higher|university|tertiary|college") | (!is.na(education_num) & education_num == 3) ~ "Higher",
+      TRUE ~ NA_character_
+    ),
+    
+    # Literacy from q111
+    # Values: "CANNOT READ AT ALL", "ABLE TO READ WHOLE SENTENCE",
+    #         "ABLE TO READ ONLY PART OF THE SENTENCE", "NO CARD WITH REQUIRED LANGUAGE"
+    mat_literacy = case_when(
+      str_detect(q111_dec, "CANNOT READ") ~ "No",
+      str_detect(q111_dec, "ABLE TO READ") ~ "Yes",
+      str_detect(q111_dec, "NO CARD") ~ NA_character_,
+      # Numeric fallback: common coding might be 0=Cannot, 1=Partial, 2=Full
+      TRUE ~ NA_character_
+    ),
+    
+    # Occupation: Not available in EN-INDEPTH
+    mat_occupation = NA_character_,
+    
+    # Ethnicity: Use country-specific q123_ variables
+    # q123_ug = Uganda, q123_gh = Ghana, q123_bd = Bangladesh,
+    # q123_et = Ethiopia, q123_gw = Guinea-Bissau
+    mat_ethnicity = coalesce(
+      safe_decode(get_col(df, "q123_ug")),
+      safe_decode(get_col(df, "q123_gh")),
+      safe_decode(get_col(df, "q123_bd")),
+      safe_decode(get_col(df, "q123_et")),
+      safe_decode(get_col(df, "q123_gw"))
+    ),
+    
+    # Country & facility
+    mat_country = mat_country_parsed,
+    mat_facility = str_to_title(safe_decode(get_col(df, "hdss"))),
+    mat_district = NA_character_,
+    mat_urban_rural = NA_character_,
+    
+    # Gravidity: Use N_gravidity (actual count) NOT gravidity (binary flag)
+    mat_gravidity = coalesce(n_gravidity, 
+                             # fallback: if N_gravidity missing, at least use binary
+                             ifelse(grav_binary == 1, NA_real_, grav_binary)),
+    
+    # Parity: Computed from tot_brpr - 1 (total births minus current)
+    mat_parity = mat_parity_computed,
+    
+    mat_previous_cs = NA_real_,
+    mat_previous_stillbirth = NA_character_,
+    mat_anc_visits = NA_real_,
+    mat_anc_provider = NA_character_,
+    mat_hiv_status = NA_character_,
+    mat_syphilis = NA_character_,
+    mat_height = NA_real_,
+    mat_weight = NA_real_,
+    mat_bmi = NA_real_,
+    mat_muac = NA_real_,
+    mat_sbp = NA_real_,
+    mat_dbp = NA_real_,
+    mat_hypertension = NA_character_,
+    mat_preeclampsia = NA_character_,
+    mat_delivery_mode = NA_character_,
+    mat_delivery_location = NA_character_,
+    mat_birth_attendant = NA_character_,
+    mat_prolonged_labour = NA_character_,
+    mat_obstructed_labour = NA_character_,
+    mat_prom = NA_character_,
+    
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 3: HOUSEHOLD SOCIOECONOMIC INDICATORS
+    # ══════════════════════════════════════════════════════════════════════
+    
+    hh_ppi_score = NA_real_,
+    hh_ppi_band = NA_character_,
+    hh_poverty_likelihood = NA_real_,
+    # hh_wealth_quintile: EN-INDEPTH quintile is REVERSED (1=Wealthiest, 5=Poorest)
+    # per data dictionary. We reverse to match unified standard: 1=Poorest, 5=Wealthiest
+    hh_wealth_quintile = {
+      q_raw <- safe_num(get_col(df, "quintile"))
+      q_reversed <- ifelse(!is.na(q_raw) & q_raw >= 1 & q_raw <= 5, 6L - as.integer(q_raw), NA_integer_)
+      case_when(
+        q_reversed == 1 ~ "1 - Poorest",
+        q_reversed == 2 ~ "2 - Poor",
+        q_reversed == 3 ~ "3 - Middle class",
+        q_reversed == 4 ~ "4 - Wealthy",
+        q_reversed == 5 ~ "5 - Wealthiest",
+        TRUE ~ NA_character_
+      )
+    },
+    
+    # SES binary: In .dta may be haven_labelled; in CSV "Poor"/"Rich"
+    hh_ses_binary = case_when(
+      str_detect(tolower(ses_dec), "poor") ~ "Poor",
+      str_detect(tolower(ses_dec), "rich") ~ "Rich",
+      TRUE ~ NA_character_
+    ),
+    
+    hh_wall_material = NA_character_,
+    hh_floor_material = NA_character_,
+    hh_ownership = NA_character_,
+    hh_num_rooms = NA_real_,
+    hh_cooking_fuel = NA_character_,
+    hh_heating_fuel = NA_character_,
+    hh_lighting = NA_character_,
+    hh_electricity = NA_character_,
+    hh_water_source = NA_character_,
+    hh_sanitation = NA_character_,
+    hh_hygiene = NA_character_,
+    hh_mosquito_net = NA_character_,
+    hh_size = NA_real_,
+    hh_monthly_income = NA_real_,
+    
+    # ══════════════════════════════════════════════════════════════════════
+    # LOCATION VARIABLES
+    # ══════════════════════════════════════════════════════════════════════
+    
+    loc_country = mat_country_parsed,
+    loc_region = NA_character_,
+    loc_district = NA_character_,
+    loc_facility = str_to_title(safe_decode(get_col(df, "hdss"))),
+    loc_village = NA_character_,
+    loc_latitude = NA_real_,
+    loc_longitude = NA_real_,
+    loc_urban_rural = NA_character_,
+    loc_facility_type = NA_character_
+  )
+  
+  # ============================================================================
+  # POST-PROCESSING: Add mat_age_cat from mat_age
+  # ============================================================================
+  result <- result %>%
+    mutate(
+      mat_age_cat = case_when(
+        is.na(mat_age) ~ NA_character_,
+        mat_age < 20 ~ "<20",
+        mat_age >= 20 & mat_age < 25 ~ "20-24",
+        mat_age >= 25 & mat_age < 30 ~ "25-29",
+        mat_age >= 30 & mat_age < 35 ~ "30-34",
+        mat_age >= 35 ~ "35+",
+        TRUE ~ NA_character_
+      )
+    )
+  
+  result %>% derive_outcomes() %>% ensure_complete_schema()
+}
+```
+
+## 2.6 WHOMCS Harmonization (29 Countries) - REWRITTEN FOR .dta SUPPORT
+
+```{r phase2-whomcs-update}
+harmonize_whomcs <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(tibble() %>% ensure_complete_schema())
+  
+  # ============================================================================
+  # ★ CHANGED: PRE-PROCESSING — Decode haven_labelled variables FIRST
+  # ============================================================================
+  # When WHOMCS is loaded from .dta, categorical variables (birthstat, neostat,
+  # sex, delabort_mode, maritalstatus, etc.) arrive as haven_labelled objects
+  # (numeric codes with text labels). Without decoding, string matching on
+  # "alive", "stillbirth", "dead" FAILS because the values appear as "1", "2", "3".
+  #
+  # This step decodes ALL haven_labelled columns to their label text BEFORE any
+  # matching logic. Continuous numeric variables (age, bw, ga, apgar) are NOT
+  # haven_labelled in the .dta, so they remain numeric and are unaffected.
+  # ============================================================================
+  
+  # --- Step A: Save numeric codes from key variables BEFORE decoding ---
+  # (needed as fallback if label decoding returns unhelpful text)
+  birthstat_num_pre <- if ("birthstat" %in% names(df) && inherits(df[["birthstat"]], "haven_labelled")) {
+    as.numeric(unclass(df[["birthstat"]]))
+  } else {
+    suppressWarnings(as.numeric(as.character(df[["birthstat"]])))
+  }
+  
+  neostat_num_pre <- if ("neostat" %in% names(df) && inherits(df[["neostat"]], "haven_labelled")) {
+    as.numeric(unclass(df[["neostat"]]))
+  } else {
+    suppressWarnings(as.numeric(as.character(df[["neostat"]])))
+  }
+  
+  sex_num_pre <- if ("sex" %in% names(df) && inherits(df[["sex"]], "haven_labelled")) {
+    as.numeric(unclass(df[["sex"]]))
+  } else {
+    suppressWarnings(as.numeric(as.character(df[["sex"]])))
+  }
+  
+  delmode_num_pre <- if ("delabort_mode" %in% names(df) && inherits(df[["delabort_mode"]], "haven_labelled")) {
+    as.numeric(unclass(df[["delabort_mode"]]))
+  } else {
+    suppressWarnings(as.numeric(as.character(df[["delabort_mode"]])))
+  }
+  
+  # ★ CHANGED: Save facilitycod labels BEFORE bulk decoding
+  # In the .dta, facilitycod has value labels mapping codes to facility names
+  facilitycod_lbl <- if ("facilitycod" %in% names(df) && inherits(df[["facilitycod"]], "haven_labelled")) {
+    tryCatch(as.character(haven::as_factor(df[["facilitycod"]])),
+             error = function(e) rep(NA_character_, nrow(df)))
+  } else {
+    rep(NA_character_, nrow(df))
+  }
+  
+  # --- Step B: Decode ALL haven_labelled columns to character ---
+  if (requireNamespace("haven", quietly = TRUE)) {
+    df <- df %>% mutate(across(
+      where(~inherits(.x, "haven_labelled")),
+      ~tryCatch(as.character(haven::as_factor(.x)),
+                error = function(e) as.character(.x))
+    ))
+  }
+  
+  # --- Step C: Trim whitespace from all character columns ---
+  # (Use tryCatch for columns with encoding issues - e.g. cp1252 in WHOMCS)
+  safe_trim <- function(col) {
+    tryCatch(
+      trimws(as.character(col)),
+      error = function(e) {
+        # Force encoding to UTF-8, replacing invalid bytes
+        as.character(iconv(as.character(col), from = "", to = "UTF-8", sub = ""))
+      }
+    )
+  }
+  df <- df %>% mutate(across(where(is.character), safe_trim))
+  
+  n <- nrow(df)
+  
+  # ============================================================================
+  # HELPER: Robust Yes/No from mixed 0/1 numeric and "yes"/"no" strings
+  # ============================================================================
+  robust_yesno <- function(x) {
+    x_chr <- tolower(trimws(as.character(x)))
+    case_when(
+      is.na(x) | x_chr %in% c("", "na", "nan") ~ NA_character_,
+      x_chr %in% c("yes", "y", "1", "true") ~ "Yes",
+      x_chr %in% c("no", "n", "0", "false") ~ "No",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  # ============================================================================
+  # EXTRACT DECODED COLUMNS (all now character after pre-processing)
+  # ============================================================================
+  
+  birthstat_chr  <- tolower(trimws(get_col_chr(df, "birthstat")))
+  neostat_chr    <- tolower(trimws(get_col_chr(df, "neostat")))
+  sex_chr        <- tolower(trimws(get_col_chr(df, "sex")))
+  country_chr    <- get_col_chr(df, "country")
+  delmode_chr    <- tolower(trimws(get_col_chr(df, "delabort_mode")))
+  marital_chr    <- get_col_chr(df, "maritalstatus")
+  
+  # Indicator variables (decoded to long descriptive text)
+  sb_ind_chr     <- tolower(get_col_chr(df, "stillbirth_indicator"))
+  lfd_ind_chr    <- tolower(get_col_chr(df, "lfd_indicator"))
+  enm_ind_chr    <- tolower(get_col_chr(df, "enm_indicator"))
+  pnm_ind_chr    <- tolower(get_col_chr(df, "pnm_indicator"))
+  
+  # Numeric variables (these were NOT haven_labelled, stay numeric)
+  num_neo_num    <- get_col_num(df, "num_neo")
+  
+  # WHO_REGION
+  who_region_chr <- get_col_chr(df, "who_region")
+  
+  # ============================================================================
+  # ★ CHANGED: FACILITY — Decode facilitycod labels, with fallbacks
+  # ============================================================================
+  # Priority 1: facilitycod haven labels (decoded before bulk decoding)
+  # Priority 2: name_fac (actual facility name, 76% complete in CSV)
+  # Priority 3: FACILITY_ID (country+code combo, 100% complete)
+  # Priority 4: facilitycod as numeric string (last resort)
+  
+  name_fac_chr     <- get_col_chr(df, "name_fac")
+  facility_id_chr  <- get_col_chr(df, "facility_id")
+  facilitycod_chr  <- get_col_chr(df, "facilitycod")
+  
+  # facilitycod_lbl was extracted before decoding — check if it has real names
+  # (if it's just the numeric code repeated as string, it's not useful)
+  facilitycod_lbl_useful <- ifelse(
+    !is.na(facilitycod_lbl) & nchar(facilitycod_lbl) > 3 &
+      !grepl("^[0-9]+$", facilitycod_lbl),
+    facilitycod_lbl, NA_character_
+  )
+  
+  facility_best <- coalesce(
+    facilitycod_lbl_useful,                                # .dta decoded label
+    ifelse(!is.na(name_fac_chr) & name_fac_chr != "",
+           name_fac_chr, NA_character_),                   # name_fac
+    ifelse(!is.na(facility_id_chr) & facility_id_chr != "",
+           facility_id_chr, NA_character_),                # FACILITY_ID (e.g. "AFG11")
+    ifelse(!is.na(facilitycod_chr) & facilitycod_chr != "",
+           facilitycod_chr, NA_character_)                 # bare code as last resort
+  )
+  
+  # ============================================================================
+  # ★ CHANGED: OUTCOMES — Dual matching (decoded strings + numeric fallback)
+  # ============================================================================
+  # birthstat: 1=alive, 2=fresh stillbirth, 3=macerated stillbirth
+  # After decoding: "alive", "fresh stillbirth", "macerated stillbirth"
+  # Numeric fallback handles case where labels didn't decode
+  
+  is_alive_str      <- birthstat_chr == "alive" & !is.na(birthstat_chr)
+  is_fresh_sb_str   <- str_detect(birthstat_chr, "fresh") & !is.na(birthstat_chr)
+  is_mac_sb_str     <- str_detect(birthstat_chr, "macerat") & !is.na(birthstat_chr)
+  is_any_sb_str     <- str_detect(birthstat_chr, "stillbirth") & !is.na(birthstat_chr)
+  
+  is_alive_num      <- birthstat_num_pre == 1 & !is.na(birthstat_num_pre)
+  is_fresh_sb_num   <- birthstat_num_pre == 2 & !is.na(birthstat_num_pre)
+  is_mac_sb_num     <- birthstat_num_pre == 3 & !is.na(birthstat_num_pre)
+  is_any_sb_num     <- birthstat_num_pre %in% c(2, 3) & !is.na(birthstat_num_pre)
+  
+  # Combined: string match OR numeric match
+  is_alive    <- is_alive_str | is_alive_num
+  is_fresh_sb <- is_fresh_sb_str | is_fresh_sb_num
+  is_mac_sb   <- is_mac_sb_str | is_mac_sb_num
+  is_sb       <- is_any_sb_str | is_any_sb_num
+  has_outcome <- is_alive | is_sb
+  
+  # neostat: 1=alive, 2=dead
+  neo_alive_str <- neostat_chr == "alive" & !is.na(neostat_chr)
+  neo_dead_str  <- neostat_chr == "dead" & !is.na(neostat_chr)
+  neo_alive_num <- neostat_num_pre == 1 & !is.na(neostat_num_pre)
+  neo_dead_num  <- neostat_num_pre == 2 & !is.na(neostat_num_pre)
+  
+  neo_alive <- neo_alive_str | neo_alive_num
+  neo_dead  <- neo_dead_str | neo_dead_num
+  
+  # ============================================================================
+  # ★ CHANGED: DELIVERY MODE — String + numeric dual matching
+  # ============================================================================
+  # delabort_mode: 1=vaginal delivery, 2=forceps, 3=vacuum aspiration,
+  #                4=caesarean section, 5+=other
+  
+  mat_delivery_mode_std <- case_when(
+    # Numeric code matching (handles .dta where labels didn't decode)
+    delmode_num_pre == 4 ~ "Caesarean",
+    delmode_num_pre %in% c(2, 3) ~ "Vaginal assisted",
+    delmode_num_pre == 1 ~ "Vaginal",
+    !is.na(delmode_num_pre) & delmode_num_pre >= 5 ~ "Other",
+    # String pattern matching (handles decoded labels and CSV strings)
+    str_detect(delmode_chr, "caesarean|c-section|c.section") ~ "Caesarean",
+    str_detect(delmode_chr, "forcep|vacuum|instrumental") ~ "Vaginal assisted",
+    str_detect(delmode_chr, "vaginal") ~ "Vaginal",
+    !is.na(delmode_chr) & delmode_chr != "" ~ "Other",
+    TRUE ~ NA_character_
+  )
+  
+  # ============================================================================
+  # ★ CHANGED: INFANT SEX — String + numeric dual matching
+  # ============================================================================
+  # WHOMCS sex variable is STRING in CSV ("male"/"female"), not numeric
+  # The sample shows: "male" (968), "female" (931), missing (12)
+  infant_sex_std <- case_when(
+    # Numeric code matching (for .dta with haven_labelled)
+    sex_num_pre == 1 ~ "Male",
+    sex_num_pre == 2 ~ "Female",
+    # String pattern matching (handles CSV strings and decoded labels)
+    # Use more permissive pattern - contains "male" but not "female"
+    str_detect(sex_chr, "male") & !str_detect(sex_chr, "female") ~ "Male",
+    str_detect(sex_chr, "female") ~ "Female",
+    TRUE ~ NA_character_
+  )
+  
+  # ============================================================================
+  # BUILD RESULT TIBBLE
+  # ============================================================================
+  
+  result <- tibble(
+    unified_id = paste0("WHOMCS_", seq_len(n)),
+    study_source = "WHOMCS",
+    study_design     = "Facility-based",
+    module           = "Facility cross-sectional survey",
+    sample_weight    = NA_real_,
+    raw_id = get_col_chr(df, "mother_id"),
+    raw_id_secondary = get_col_chr(df, "baby_id"),
+    
+    # ── Dates ────────────────────────────────────────────────────────────────
+    study_date = parse_date_multi(get_col(df, "datehosparrival")),
+    studyyear = as.integer(year(parse_date_multi(get_col(df, "datehosparrival")))),
+    out_dob = parse_date_multi(get_col(df, "datedelorabort")),
+    yob = as.integer(year(parse_date_multi(get_col(df, "datedelorabort")))),
+    delivery_date_raw = parse_date_multi(get_col(df, "datedelorabort")),
+    conception_date = as.Date(NA),
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 1: PRIMARY OUTCOME VARIABLES  ★ CHANGED — dual matching
+    # ══════════════════════════════════════════════════════════════════════════
+    
+    # STILLBIRTH: uses pre-computed boolean vectors (string + numeric combined)
+    out_stillbirth = case_when(
+      is_sb    ~ "Yes",
+      is_alive ~ "No",
+      # Fallback to indicator variables
+      str_detect(sb_ind_chr, "stillbirth") ~ "Yes",
+      str_detect(sb_ind_chr, "born alive")  ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_livebirth = case_when(
+      is_alive ~ "Yes",
+      is_sb    ~ "No",
+      str_detect(sb_ind_chr, "born alive")  ~ "Yes",
+      str_detect(sb_ind_chr, "stillbirth") ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_fresh_stillbirth = case_when(
+      is_fresh_sb ~ "Yes",
+      is_alive    ~ "No",
+      is_mac_sb   ~ "No",
+      str_detect(lfd_ind_chr, "fresh")      ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    out_macerated_stillbirth = case_when(
+      is_mac_sb   ~ "Yes",
+      is_alive    ~ "No",
+      is_fresh_sb ~ "No",
+      str_detect(lfd_ind_chr, "macerated")  ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    
+    # Stillbirth ≥20 weeks: STILLBIRTH_INDICATOR (ICD definition, ≥22 wks)
+    out_stillbirth_20wks = case_when(
+      str_detect(sb_ind_chr, "stillbirth") ~ "Yes",
+      str_detect(sb_ind_chr, "born alive")  ~ "No",
+      TRUE ~ NA_character_
+    ),
+    # Stillbirth ≥28 weeks: LFD_INDICATOR (WHO definition, ≥28 wks)
+    out_stillbirth_28wks = case_when(
+      str_detect(lfd_ind_chr, "stillbirth") ~ "Yes",
+      str_detect(lfd_ind_chr, "born alive")  ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # NEONATAL DEATH: uses pre-computed boolean vectors
+    # Only applicable to live births (stillbirths get NA)
+    out_nnd = case_when(
+      is_sb      ~ NA_character_,
+      neo_dead   ~ "Yes",
+      neo_alive  ~ "No",
+      # Fallback to ENM_INDICATOR
+      str_detect(enm_ind_chr, "neonatal death") ~ "Yes",
+      str_detect(enm_ind_chr, "alive")           ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # Numeric outcomes (not haven_labelled — unaffected by pre-processing)
+    out_ga_weeks = get_col_num(df, "ga"),
+    out_ga_days = get_col_num(df, "ga") * 7,
+    out_ga_method = "Clinical estimate (facility records)",
+    out_birthweight_g = get_col_num(df, "bw"),
+    out_birthweight_centile = NA_real_,
+    out_birthweight_zscore = NA_real_,
+    
+    # ★ CHANGED: Infant sex — dual matching
+    out_infant_sex = infant_sex_std,
+    
+    out_apgar_1min = NA_real_,
+    out_apgar_5min = get_col_num(df, "apgar"),
+    out_apgar_10min = NA_real_,
+    out_sga = NA_character_,
+    out_lga = NA_character_,
+    out_dod = parse_date_multi(get_col(df, "neo_date")),
+    out_ageatdeath = NA_real_,
+    
+    # Multiple births: num_neo (total neonates delivered)
+    out_multiple = case_when(
+      num_neo_num > 1  ~ "Yes",
+      num_neo_num == 1 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 2: MATERNAL DEMOGRAPHICS
+    # ══════════════════════════════════════════════════════════════════════════
+    
+    mat_age = get_col_num(df, "age"),
+    mat_marital_status = marital_chr,
+    mat_religion = NA_character_,
+    # Education: Convert years of schooling to standard categories
+    # None (0), Primary (1-6), Secondary (7-12), Higher (>12)
+    mat_education = {
+      yrs <- get_col_num(df, "yearsschool")
+      case_when(
+        is.na(yrs) ~ NA_character_,
+        yrs == 0 ~ "None",
+        yrs >= 1 & yrs <= 6 ~ "Primary",
+        yrs >= 7 & yrs <= 12 ~ "Secondary",
+        yrs > 12 ~ "Higher",
+        TRUE ~ NA_character_
+      )
+    },
+    mat_literacy = NA_character_,
+    mat_occupation = NA_character_,
+    mat_ethnicity = NA_character_,
+    mat_country = str_to_title(country_chr),
+    
+    # ★ CHANGED: mat_facility — uses facilitycod labels with fallbacks
+    mat_facility = facility_best,
+    
+    mat_district = NA_character_,
+    mat_urban_rural = NA_character_,
+    mat_gravidity = get_col_num(df, "numpreg"),
+    mat_parity = get_col_num(df, "previousbirth"),
+    mat_previous_cs = get_col_num(df, "prevcaes"),
+    mat_previous_stillbirth = NA_character_,
+    mat_anc_visits = NA_real_,
+    mat_anc_provider = NA_character_,
+    mat_hiv_status = robust_yesno(get_col(df, "hivpos")),
+    mat_syphilis = NA_character_,
+    mat_height = NA_real_,
+    mat_weight = NA_real_,
+    mat_bmi = NA_real_,
+    mat_muac = NA_real_,
+    mat_sbp = NA_real_,
+    mat_dbp = NA_real_,
+    mat_hypertension = robust_yesno(get_col(df, "chrohype")),
+    mat_preeclampsia = robust_yesno(get_col(df, "preeclampsia")),
+    
+    # ★ CHANGED: Delivery mode — dual matching
+    mat_delivery_mode = mat_delivery_mode_std,
+    
+    # WHOMCS is facility-based: all births at hospitals
+    mat_delivery_location = "Hospital",
+    mat_birth_attendant = NA_character_,
+    mat_prolonged_labour = NA_character_,
+    mat_obstructed_labour = NA_character_,
+    mat_prom = NA_character_,
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION 3: HOUSEHOLD SOCIOECONOMIC INDICATORS
+    # ══════════════════════════════════════════════════════════════════════════
+    
+    hh_ppi_score = NA_real_,
+    hh_ppi_band = NA_character_,
+    hh_poverty_likelihood = NA_real_,
+    hh_wealth_quintile = NA_character_,
+    hh_ses_binary = NA_character_,
+    hh_wall_material = NA_character_,
+    hh_floor_material = NA_character_,
+    hh_ownership = NA_character_,
+    hh_num_rooms = NA_real_,
+    hh_cooking_fuel = NA_character_,
+    hh_heating_fuel = NA_character_,
+    hh_lighting = NA_character_,
+    hh_electricity = NA_character_,
+    hh_water_source = NA_character_,
+    hh_sanitation = NA_character_,
+    hh_hygiene = NA_character_,
+    hh_mosquito_net = NA_character_,
+    hh_size = NA_real_,
+    hh_monthly_income = NA_real_,
+    
+    # ══════════════════════════════════════════════════════════════════════════
+    # LOCATION
+    # ══════════════════════════════════════════════════════════════════════════
+    
+    loc_country = str_to_title(country_chr),
+    loc_region = who_region_chr,
+    loc_district = NA_character_,
+    loc_facility = facility_best,
+    loc_village = NA_character_,
+    loc_latitude = NA_real_,
+    loc_longitude = NA_real_,
+    loc_urban_rural = NA_character_,
+    loc_facility_type = NA_character_
+  )
+  
+  # ============================================================================
+  # ★ POST-PROCESSING: Age at death, Study year, and mat_age_cat
+  # ============================================================================
+  
+  # Extract days variable for age at death (WHOMCS has this directly)
+  days_val <- suppressWarnings(as.numeric(get_col_chr(df, "days")))
+  
+  result <- result %>%
+    mutate(
+      # Age at death: Primary = DOD - DOB; Fallback = days variable
+      out_ageatdeath = case_when(
+        out_nnd == "Yes" & !is.na(out_dod) & !is.na(out_dob) ~
+          as.numeric(difftime(out_dod, out_dob, units = "days")),
+        # Use days variable as fallback for NNDs
+        out_nnd == "Yes" & !is.na(days_val) & days_val >= 0 & days_val <= 28 ~ days_val,
+        TRUE ~ NA_real_
+      ),
+      # Validate age at death (must be 0-28 days for NND)
+      out_ageatdeath = ifelse(!is.na(out_ageatdeath) & 
+                                (out_ageatdeath < 0 | out_ageatdeath > 28),
+                              NA_real_, out_ageatdeath),
+      
+      # Study year validation: WHOMCS was conducted 2010-2011
+      # Clean anomalous years (e.g., "18029-2012" issue)
+      studyyear = ifelse(is.na(studyyear) | studyyear < 2000 | studyyear > 2015,
+                         NA_integer_, studyyear),
+      # Fallback: try to get year from DOB if study_date parsing failed
+      studyyear = ifelse(is.na(studyyear) & !is.na(yob) & yob >= 2000 & yob <= 2015,
+                         yob, studyyear),
+      
+      # Compute mat_age_cat from mat_age
+      mat_age_cat = case_when(
+        is.na(mat_age) ~ NA_character_,
+        mat_age < 20 ~ "<20",
+        mat_age >= 20 & mat_age < 25 ~ "20-24",
+        mat_age >= 25 & mat_age < 30 ~ "25-29",
+        mat_age >= 30 & mat_age < 35 ~ "30-34",
+        mat_age >= 35 ~ "35+",
+        TRUE ~ NA_character_
+      )
+    )
+  
+  result %>% derive_outcomes() %>% ensure_complete_schema()
+}
+```
+
+# Phase 3: Run Harmonization and Combine
+
+```{r phase3-harmonize}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                     PHASE 3: HARMONIZATION                                  ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+harmonized_ncops <- harmonize_ncops(raw_ncops)
+cat(sprintf("✓ NCOPS harmonized:      %s rows\n", format(nrow(harmonized_ncops), big.mark=",")))
+
+harmonized_alert <- harmonize_alert(raw_alert)
+cat(sprintf("✓ ALERT harmonized:      %s rows\n", format(nrow(harmonized_alert), big.mark=",")))
+
+harmonized_precise <- harmonize_precise(raw_precise)
+cat(sprintf("✓ PRECISE harmonized:    %s rows\n", format(nrow(harmonized_precise), big.mark=",")))
+
+harmonized_ptbi <- harmonize_ptbi(raw_ptbi)
+cat(sprintf("✓ PTBi harmonized:       %s rows\n", format(nrow(harmonized_ptbi), big.mark=",")))
+
+harmonized_enindepth <- harmonize_enindepth(raw_enindepth)
+cat(sprintf("✓ EN-INDEPTH harmonized: %s rows\n", format(nrow(harmonized_enindepth), big.mark=",")))
+
+harmonized_whomcs <- harmonize_whomcs(raw_whomcs)
+cat(sprintf("✓ WHOMCS harmonized:     %s rows\n", format(nrow(harmonized_whomcs), big.mark=",")))
+
+# Coerce all to character to avoid type clashes across studies
+coerce_types <- function(df) {
+  df %>% mutate(
+    across(where(is.logical), ~as.character(.x)),
+    across(where(is.numeric) & !matches("mat_age|mat_weight|mat_height|mat_bmi|neo_birthweight|neo_apgar|out_ga|out_ageatdeath|out_birthweight|sample_weight"), as.character)
+  )
+}
+harmonized_ncops     <- coerce_types(harmonized_ncops)
+harmonized_alert     <- coerce_types(harmonized_alert)
+harmonized_precise   <- coerce_types(harmonized_precise)
+harmonized_ptbi      <- coerce_types(harmonized_ptbi)
+harmonized_enindepth <- coerce_types(harmonized_enindepth)
+harmonized_whomcs    <- coerce_types(harmonized_whomcs)
+
+# Combine all datasets
+unified_dataset <- bind_rows(
+  harmonized_ncops,
+  harmonized_alert,
+  harmonized_precise,
+  harmonized_ptbi,
+  harmonized_enindepth,
+  harmonized_whomcs
+)
+
+# Location standardisation
+unified_dataset <- unified_dataset %>%
+  mutate(
+    loc_country = coalesce(loc_country, mat_country),
+    loc_district = coalesce(loc_district, mat_district),
+    loc_facility = coalesce(loc_facility, mat_facility),
+    loc_urban_rural = coalesce(loc_urban_rural, mat_urban_rural),
+    loc_country = case_when(
+      tolower(loc_country) %in% c("gambia", "the gambia") ~ "The Gambia",
+      tolower(loc_country) %in% c("guinea bissau", "guinea-bissau") ~ "Guinea-Bissau",
+      TRUE ~ loc_country
+    ),
+    mat_country = coalesce(mat_country, loc_country)
+  )
+
+# ════════════════════════════════════════════════════════════════════════════
+# ★ v10.9: STANDARDIZE DELIVERY LOCATION ACROSS ALL STUDIES
+# ════════════════════════════════════════════════════════════════════════════
+# Apply consistent categories: Hospital, Health center, Home, En route, Other
+
+cat("\n── Standardizing mat_delivery_location ──\n")
+
+# Show raw values before standardization
+cat("Before standardization:\n")
+print(unified_dataset %>% 
+        filter(!is.na(mat_delivery_location)) %>%
+        count(study_source, mat_delivery_location) %>%
+        pivot_wider(names_from = study_source, values_from = n, values_fill = 0))
+
+# Apply standardization
+unified_dataset <- unified_dataset %>%
+  mutate(
+    mat_delivery_location = std_delivery_location(mat_delivery_location)
+  )
+
+cat("\nAfter standardization:\n")
+print(unified_dataset %>% 
+        filter(!is.na(mat_delivery_location)) %>%
+        count(study_source, mat_delivery_location) %>%
+        pivot_wider(names_from = study_source, values_from = n, values_fill = 0))
+
+# ════════════════════════════════════════════════════════════════════════════
+# ★ v10.11: POST-PROCESSING FUNCTIONS
+# ════════════════════════════════════════════════════════════════════════════
+
+cat("\n── Applying v10.11 Post-Processing ──\n")
+
+# Fix #7: Apply standardized education categories
+cat("  ★ Fix #7: Standardizing education categories...\n")
+unified_dataset <- unified_dataset %>%
+  mutate(
+    mat_education = std_education(mat_education)
+  )
+
+# Fix #9: Apply standardized marital status categories
+cat("  ★ Fix #9: Standardizing marital status categories...\n")
+unified_dataset <- unified_dataset %>%
+  mutate(
+    mat_marital_status = std_marital_status(mat_marital_status)
+  )
+
+# Fix #11: DOD for stillbirths (DOD = DOB for stillbirths)
+cat("  ★ Fix #11: Setting DOD = DOB for stillbirths...\n")
+unified_dataset <- unified_dataset %>%
+  mutate(
+    out_dod = case_when(
+      out_stillbirth == "Yes" & is.na(out_dod) & !is.na(out_dob) ~ out_dob,
+      TRUE ~ out_dod
+    )
+  )
+
+# Fix #13: Calculate conception date with source tracking
+cat("  ★ Fix #13: Calculating conception dates...\n")
+unified_dataset <- unified_dataset %>%
+  mutate(
+    conception_date_calc = case_when(
+      !is.na(out_dob) & !is.na(out_ga_days) ~ out_dob - round(as.numeric(out_ga_days)),
+      !is.na(out_dob) & !is.na(out_ga_weeks) ~ out_dob - round(as.numeric(out_ga_weeks) * 7),
+      TRUE ~ as.Date(NA)
+    ),
+    conception_date = coalesce(conception_date, conception_date_calc),
+    conception_date_source = case_when(
+      !is.na(conception_date) & is.na(conception_date_calc) ~ "Original from study",
+      is.na(conception_date) & !is.na(conception_date_calc) ~ "Calculated from DOB and GA",
+      !is.na(conception_date) & !is.na(conception_date_calc) ~ "Original (verified)",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(-conception_date_calc)
+
+# Fix #15: Add hypertension staging and C-section flag
+cat("  ★ Fix #15: Adding hypertension staging and C-section flag...\n")
+unified_dataset <- unified_dataset %>%
+  mutate(
+    mat_hypertension_stage = std_hypertension_stage(
+      suppressWarnings(as.numeric(mat_sbp)), 
+      suppressWarnings(as.numeric(mat_dbp)), 
+      mat_hypertension
+    ),
+    mat_csection = case_when(
+      mat_delivery_mode == "Caesarean" ~ "Yes",
+      mat_delivery_mode %in% c("Vaginal spontaneous", "Vaginal assisted", "Vaginal breech", "Vaginal") ~ "No",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Fix #16: Derive literacy from education
+cat("  ★ Fix #16: Deriving literacy from education...\n")
+unified_dataset <- unified_dataset %>%
+  mutate(
+    mat_literacy = case_when(
+      !is.na(mat_literacy) & mat_literacy %in% c("Yes", "No", "Partial") ~ mat_literacy,
+      mat_education %in% c("Secondary", "Higher") ~ "Yes",
+      mat_education == "Primary" ~ "Partial",
+      mat_education == "None" ~ "No",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Fix #10: Add SGA classification summary (using existing values if available)
+cat("  ★ Fix #10: Adding size for GA classification...\n")
+unified_dataset <- unified_dataset %>%
+  mutate(
+    out_aga = case_when(
+      out_sga == "No" & (out_lga == "No" | is.na(out_lga)) ~ "Yes",
+      out_sga == "Yes" | out_lga == "Yes" ~ "No",
+      TRUE ~ NA_character_
+    ),
+    out_sizeforGA = case_when(
+      out_sga == "Yes" ~ "SGA (<10th centile)",
+      out_lga == "Yes" ~ "LGA (>90th centile)",
+      out_aga == "Yes" ~ "AGA (10th-90th centile)",
+      TRUE ~ NA_character_
+    ),
+    out_dob_source = case_when(
+      !is.na(out_dob) ~ "Available",
+      TRUE ~ "Missing"
+    )
+  )
+
+# Fix #6: Final pass to ensure early/late NND consistency
+cat("  ★ Fix #6: Final NND timing consistency check...\n")
+unified_dataset <- unified_dataset %>%
+  mutate(
+    out_nnd_early = case_when(
+      out_nnd != "Yes" & out_nnd_early == "Yes" ~ "No",
+      TRUE ~ out_nnd_early
+    ),
+    out_nnd_late = case_when(
+      out_nnd != "Yes" & out_nnd_late == "Yes" ~ "No",
+      TRUE ~ out_nnd_late
+    )
+  )
+
+cat("  ✓ v10.11 post-processing complete\n")
+
+# ════════════════════════════════════════════════════════════════════════════
+# v10.11 VERIFICATION CHECKS
+# ════════════════════════════════════════════════════════════════════════════
+
+cat("\n── v10.11 Verification Checks ──\n")
+
+# Check Fix #7: Education categories
+cat("\n★ Fix #7 - Education Categories:\n")
+print(unified_dataset %>% count(mat_education) %>% arrange(desc(n)))
+
+# Check Fix #8: Delivery mode (should NOT have "Instrumental")
+cat("\n★ Fix #8 - Delivery Mode Categories:\n")
+print(unified_dataset %>% count(mat_delivery_mode) %>% arrange(desc(n)))
+if ("Instrumental" %in% unique(unified_dataset$mat_delivery_mode)) {
+  warning("⚠ 'Instrumental' still present in mat_delivery_mode!")
+} else {
+  cat("  ✓ No 'Instrumental' - 'Vaginal assisted' used instead\n")
+}
+
+# Check Fix #9: Marital status
+cat("\n★ Fix #9 - Marital Status Categories:\n")
+print(unified_dataset %>% count(mat_marital_status) %>% arrange(desc(n)))
+
+# Check Fix #6: Early/Late NND consistency
+cat("\n★ Fix #6 - Early/Late NND Consistency:\n")
+inconsistent_early <- sum(unified_dataset$out_nnd == "No" & unified_dataset$out_nnd_early == "Yes", na.rm = TRUE)
+inconsistent_late <- sum(unified_dataset$out_nnd == "No" & unified_dataset$out_nnd_late == "Yes", na.rm = TRUE)
+cat(sprintf("  Inconsistent early NND: %d (should be 0)\n", inconsistent_early))
+cat(sprintf("  Inconsistent late NND: %d (should be 0)\n", inconsistent_late))
+
+# Check Fix #15: Hypertension staging
+cat("\n★ Fix #15 - Hypertension Staging:\n")
+print(unified_dataset %>% filter(!is.na(mat_hypertension_stage)) %>% 
+        count(study_source, mat_hypertension_stage) %>%
+        pivot_wider(names_from = mat_hypertension_stage, values_from = n, values_fill = 0))
+
+cat(sprintf("\n=== UNIFIED DATASET: %s total rows, %s columns ===\n", 
+            format(nrow(unified_dataset), big.mark=","), ncol(unified_dataset)))
+
+
+# ── v10.13: GA Method Verification ──
+cat("\n── out_ga_method by study_source ──\n")
+print(
+  unified_dataset %>%
+    count(study_source, out_ga_method) %>%
+    pivot_wider(names_from = study_source, values_from = n, values_fill = 0))
+
+# ── v10.12/v10.13: Study Design & Module Verification ──
+cat("\n── study_design × module by study_source ──\n")
+print(
+  unified_dataset %>%
+    count(study_source, study_design, module) %>%
+    arrange(study_source))
+# ── Wealth Quintile Verification ──
+cat("\n── Wealth Quintile Distribution by Study ──\n")
+wq_summary <- unified_dataset %>%
+  filter(!is.na(hh_wealth_quintile)) %>%
+  count(study_source, hh_wealth_quintile) %>%
+  pivot_wider(names_from = hh_wealth_quintile, values_from = n, values_fill = 0)
+if (nrow(wq_summary) > 0) {
+  print(kable(wq_summary, caption = "hh_wealth_quintile by Study"))
+} else {
+  cat("  (No wealth quintile data found — check SES file merges)\n")
+}
+
+saveRDS(unified_dataset, "intermediate/phase3_unified.rds")
+```
+
+# Phase 4: Identifier Tracking
+
+```{r phase4-identifiers}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                     PHASE 4: IDENTIFIER TRACKING                            ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+identifier_data <- unified_dataset %>%
+  select(unified_id, study_source, raw_id, raw_id_secondary) %>%
+  mutate(created_date = Sys.Date(), pipeline_version = VERSION)
+
+saveRDS(identifier_data, "intermediate/phase4_identifiers.rds")
+write_csv(identifier_data, "output/identifier_tracking.csv")
+cat(sprintf("✓ Created identifier tracking: %s rows\n", format(nrow(identifier_data), big.mark=",")))
+```
+
+# Phase 5: Data Quality Summary
+
+```{r phase5-quality}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                     PHASE 5: DATA QUALITY SUMMARY                           ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+study_summary <- unified_dataset %>%
+  group_by(study_source) %>%
+  summarise(
+    n_records = n(),
+    n_countries = n_distinct(mat_country, na.rm = TRUE),
+    pct_stillbirth = round(100 * mean(out_stillbirth == "Yes", na.rm = TRUE), 1),
+    pct_nnd = round(100 * mean(out_nnd == "Yes", na.rm = TRUE), 1),
+    pct_ga_complete = round(100 * mean(!is.na(out_ga_weeks)), 1),
+    pct_bw_complete = round(100 * mean(!is.na(out_birthweight_g)), 1),
+    .groups = "drop"
+  )
+
+print(kable(study_summary, caption = "Study-Level Summary"))
+
+# ============================================================================
+# ★ VERIFICATION TABLES FOR v10.8 FIXES
+# ============================================================================
+
+cat("\n\n═══ VERIFICATION: Infant Sex by Study ═══\n")
+sex_check <- unified_dataset %>%
+  count(study_source, out_infant_sex) %>%
+  pivot_wider(names_from = out_infant_sex, values_from = n, values_fill = 0)
+print(kable(sex_check, caption = "Infant Sex Distribution (check ALERT/WHOMCS have both sexes)"))
+
+cat("\n\n═══ VERIFICATION: Study Year Range by Study ═══\n")
+year_check <- unified_dataset %>%
+  group_by(study_source) %>%
+  summarise(
+    min_year = min(studyyear, na.rm = TRUE),
+    max_year = max(studyyear, na.rm = TRUE),
+    n_missing = sum(is.na(studyyear)),
+    pct_complete = round(100 * mean(!is.na(studyyear)), 1),
+    .groups = "drop"
+  )
+print(kable(year_check, caption = "Study Year Range (check WHOMCS is 2010-2011)"))
+
+cat("\n\n═══ VERIFICATION: Early/Late NND by Study ═══\n")
+nnd_check <- unified_dataset %>%
+  filter(out_nnd == "Yes") %>%
+  count(study_source, out_nnd_early, out_nnd_late) %>%
+  arrange(study_source)
+print(kable(nnd_check, caption = "Early/Late NND Classification for NNDs"))
+
+cat("\n\n═══ VERIFICATION: Age at Death Summary for NNDs ═══\n")
+age_death_check <- unified_dataset %>%
+  filter(out_nnd == "Yes") %>%
+  group_by(study_source) %>%
+  summarise(
+    n_nnd = n(),
+    n_with_age = sum(!is.na(out_ageatdeath)),
+    pct_age_known = round(100 * mean(!is.na(out_ageatdeath)), 1),
+    mean_age_days = round(mean(out_ageatdeath, na.rm = TRUE), 1),
+    median_age_days = median(out_ageatdeath, na.rm = TRUE),
+    .groups = "drop"
+  )
+print(kable(age_death_check, caption = "Age at Death for NNDs (check ALERT/WHOMCS have values)"))
+
+cat("\n\n═══ VERIFICATION: Maternal Age Category by Study ═══\n")
+agecat_check <- unified_dataset %>%
+  count(study_source, mat_age_cat) %>%
+  pivot_wider(names_from = mat_age_cat, values_from = n, values_fill = 0)
+print(kable(agecat_check, caption = "Maternal Age Category Distribution"))
+
+cat("\n\n═══ VERIFICATION: Education Level by Study ═══\n")
+edu_check <- unified_dataset %>%
+  filter(!is.na(mat_education)) %>%
+  count(study_source, mat_education) %>%
+  pivot_wider(names_from = mat_education, values_from = n, values_fill = 0)
+if (nrow(edu_check) > 0) {
+  print(kable(edu_check, caption = "Education Distribution (check WHOMCS has categories not years)"))
+}
+
+cat("\n\n═══ VERIFICATION: Ethnicity Completeness by Study ═══\n")
+eth_check <- unified_dataset %>%
+  group_by(study_source) %>%
+  summarise(
+    n_total = n(),
+    n_with_ethnicity = sum(!is.na(mat_ethnicity) & mat_ethnicity != ""),
+    pct_complete = round(100 * mean(!is.na(mat_ethnicity) & mat_ethnicity != ""), 1),
+    .groups = "drop"
+  )
+print(kable(eth_check, caption = "Ethnicity Completeness (check EN-INDEPTH has values)"))
+
+# ============================================================================
+# ★ VERIFICATION TABLES FOR v10.9 FIXES
+# ============================================================================
+
+cat("\n\n═══ v10.9: DOB Completeness by Study ═══\n")
+dob_check <- unified_dataset %>%
+  group_by(study_source) %>%
+  summarise(
+    n_total = n(),
+    n_with_dob = sum(!is.na(out_dob)),
+    pct_complete = round(100 * mean(!is.na(out_dob)), 1),
+    .groups = "drop"
+  )
+print(kable(dob_check, caption = "DOB Completeness (check EN-INDEPTH now has values)"))
+
+cat("\n\n═══ v10.9: DOD Completeness by Study ═══\n")
+dod_check <- unified_dataset %>%
+  group_by(study_source) %>%
+  summarise(
+    n_total = n(),
+    n_with_dod = sum(!is.na(out_dod)),
+    pct_complete = round(100 * mean(!is.na(out_dod)), 1),
+    .groups = "drop"
+  )
+print(kable(dod_check, caption = "DOD Completeness (check EN-INDEPTH now has values)"))
+
+cat("\n\n═══ v10.9: Hypertension by Study ═══\n")
+hyp_check <- unified_dataset %>%
+  count(study_source, mat_hypertension) %>%
+  pivot_wider(names_from = mat_hypertension, values_from = n, values_fill = 0)
+print(kable(hyp_check, caption = "Hypertension (check ALERT now has Yes/No values)"))
+
+cat("\n\n═══ v10.9: Delivery Location by Study ═══\n")
+delloc_check <- unified_dataset %>%
+  filter(!is.na(mat_delivery_location)) %>%
+  count(study_source, mat_delivery_location) %>%
+  pivot_wider(names_from = mat_delivery_location, values_from = n, values_fill = 0)
+if (nrow(delloc_check) > 0) {
+  print(kable(delloc_check, caption = "Delivery Location (check ALERT has referral status)"))
+}
+
+cat("\n\n═══ v10.11: Birth Attendant by Study ═══\n")
+attendant_check <- unified_dataset %>%
+  filter(!is.na(mat_birth_attendant)) %>%
+  count(study_source, mat_birth_attendant) %>%
+  pivot_wider(names_from = mat_birth_attendant, values_from = n, values_fill = 0)
+if (nrow(attendant_check) > 0) {
+  print(kable(attendant_check, caption = "Birth Attendant (check PRECISE now has values)"))
+}
+
+cat("\n\n═══ v10.11: Stillbirth Thresholds by Study ═══\n")
+sb_threshold_check <- unified_dataset %>%
+  filter(out_stillbirth == "Yes") %>%
+  group_by(study_source) %>%
+  summarise(
+    n_stillbirths = n(),
+    n_sb_28wks = sum(out_stillbirth_28wks == "Yes", na.rm = TRUE),
+    n_sb_20wks = sum(out_stillbirth_20wks == "Yes", na.rm = TRUE),
+    pct_28wks = round(100 * mean(out_stillbirth_28wks == "Yes", na.rm = TRUE), 1),
+    pct_20wks = round(100 * mean(out_stillbirth_20wks == "Yes", na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+print(kable(sb_threshold_check, caption = "Stillbirth Thresholds (computed from GA)"))
+```
+
+# Phase 6: Export Final Dataset
+
+```{r phase6-export}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                     PHASE 6: EXPORT FINAL DATASET                           ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+saveRDS(unified_dataset, sprintf("output/unified_dataset_v%s.rds", VERSION))
+write_csv(unified_dataset, sprintf("output/unified_dataset_v%s.csv", VERSION))
+haven::write_dta(unified_dataset, sprintf("output/unified_dataset_v%s.dta", VERSION))
+
+# Data dictionary
+data_dict <- tibble(
+  variable = ALL_SCHEMA_VARS,
+  section = case_when(
+    variable %in% SCHEMA$identifiers ~ "Identifiers",
+    variable %in% SCHEMA$outcomes ~ "Outcomes",
+    variable %in% SCHEMA$maternal ~ "Maternal",
+    variable %in% SCHEMA$household ~ "Household",
+    variable %in% SCHEMA$location ~ "Location",
+    variable %in% SCHEMA$temporal ~ "Temporal",
+    TRUE ~ "Other"
+  )
+)
+write_csv(data_dict, sprintf("output/unified_dataset_v%s_data_dictionary.csv", VERSION))
+
+cat("✓ Saved all outputs to output/ folder\n")
+cat("\n")
+cat("════════════════════════════════════════════════════════════════════════════\n")
+cat("                      PIPELINE COMPLETE v", VERSION, "\n", sep = "")
+cat("════════════════════════════════════════════════════════════════════════════\n\n")
+
+cat(sprintf("Total Records: %s\n", format(nrow(unified_dataset), big.mark=",")))
+cat(sprintf("Total Variables: %s\n", ncol(unified_dataset)))
+cat(sprintf("Studies: %s\n", paste(unique(unified_dataset$study_source), collapse = ", ")))
+cat(sprintf("Countries: %s\n", n_distinct(unified_dataset$mat_country, na.rm = TRUE)))
+```

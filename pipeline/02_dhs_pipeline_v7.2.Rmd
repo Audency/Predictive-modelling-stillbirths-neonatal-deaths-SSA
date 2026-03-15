@@ -1,0 +1,2032 @@
+---
+title: "DHS Unified Dataset Pipeline — Complete Self-Contained"
+subtitle: "Incremental checkpointing, geographic linking, 6-study merge, auto new-survey detection"
+author: "Joseph Akuze — Wellcome Accelerator Award"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+<!--
+# ============================================================================
+# DHS UNIFIED DATASET PIPELINE v7.2 — COMPLETE SELF-CONTAINED
+# ============================================================================
+#
+# PURPOSE:
+#   Downloads, processes, and harmonizes DHS Birth Recode + Individual Recode
+#   data for all Sub-Saharan African countries into a unified dataset matching
+#   the 13-domain variable schema (outcomes, demographics, SES, etc.).
+#   THEN merges DHS data with the existing 6-study unified dataset to produce
+#   a single merged output for analysis and environmental pipelines.
+#
+# KEY FEATURES:
+#   1. Runs end-to-end from a single .Rmd file
+#   2. INCREMENTAL CHECKPOINTING: detects new surveys, processes ONLY those,
+#      merges with existing checkpoints, re-saves
+#   3. Geographic data (GE shapefiles) linked BEFORE all exports
+#   4. MERGES DHS with 6-study unified dataset (NCOPS, ALERT, PRECISE,
+#      PTBi, EN-INDEPTH, WHOMCS) into a single merged file
+#   5. Outputs: RDS, CSV, Stata (.dta) + 10% sample — all with GPS coords
+#   6. Dropbox = primary; OneDrive = optional secondary copy
+#
+# HOW TO RUN:
+#   - First time: Run ALL chunks in order (Steps 1-4 will take several hours
+#     for downloads, Step 7 takes 6-10 hours for processing).
+#   - Subsequent runs: Steps 1-6 define functions; Step 7 loads checkpoints
+#     in seconds and only processes NEW surveys if any.
+#   - To force full reprocessing: Run the "clear-checkpoints" chunk at bottom.
+#
+# INCREMENTAL UPDATES:
+#   When new DHS surveys become available:
+#   1. Re-run Steps 3-4 (query + download new surveys — rdhs caches existing)
+#   2. Re-run Step 7 — it will detect new surveys not in checkpoints,
+#      process only those, merge with existing, and re-save
+#   3. Re-run Steps 8-10 to rebuild final outputs + merged dataset
+#
+# ============================================================================
+-->
+
+
+# Step 1: Install and Load Packages
+
+```{r install-packages, eval=FALSE}
+# ============================================================================
+# INSTALL REQUIRED PACKAGES (run once)
+# ============================================================================
+install.packages(c(
+  "rdhs",          # DHS API client and dataset management
+  "haven",         # Read Stata/SPSS/SAS files
+  "tidyverse",     # Data manipulation and visualization
+  "labelled",      # Handle value labels from survey data
+  "survey",        # Survey-weighted analysis
+  "sf",            # Spatial data for GPS coordinates
+  "glue",          # String interpolation
+  "janitor",       # Data cleaning
+  "data.table",    # Fast data manipulation
+  "openxlsx",      # Excel output
+  "countrycode"    # Country code conversions
+))
+```
+
+```{r load-packages, message=FALSE, warning=FALSE}
+# ============================================================================
+# LOAD PACKAGES
+# ============================================================================
+suppressPackageStartupMessages({
+  library(rdhs)
+  library(haven)
+  library(tidyverse)
+  library(labelled)
+  library(glue)
+  library(janitor)
+  library(data.table)
+  library(openxlsx)
+  library(countrycode)
+})
+
+# Install sf if missing (needed for geographic linking)
+if (!requireNamespace("sf", quietly = TRUE)) {
+  install.packages("sf")
+}
+
+cat("All packages loaded successfully\n")
+cat(glue("rdhs version: {packageVersion('rdhs')}\n"))
+cat(glue("R version: {R.version.string}\n"))
+cat(glue("Date: {Sys.time()}\n"))
+```
+
+
+# Step 1b: Directory Setup
+
+```{r directory-setup}
+# ============================================================================
+# PROJECT DIRECTORY SETUP (v6.0)
+# ============================================================================
+# Dropbox = PRIMARY for pipeline work AND outputs
+# OneDrive = OPTIONAL secondary copy
+#
+# Layout:
+#   DROPBOX:
+#     .../unified_dataset_pipeline/
+#     ├── data/dhs/
+#     │   ├── cache/               <- rdhs downloaded .rds files
+#     │   │   └── datasets/        <- actual .rds files live here
+#     │   ├── geographic/          <- GE shapefiles (.shp, .dbf, etc.)
+#     │   ├── inventories/         <- survey/dataset inventory CSVs
+#     │   ├── processing_logs/     <- processing logs
+#     │   └── checkpoints/         <- Step 7 intermediate results (KEY!)
+#     └── outputs/dhs/             <- FINAL unified outputs
+#
+#   ONEDRIVE (optional copy):
+#     .../Datasets/master/Unified Dataset/
+# ============================================================================
+
+user <- Sys.info()[["user"]]
+cat(glue("Detected user: {user}\n"))
+
+# --- CONFIGURATION: Set your local paths below ---
+# Add your username and paths, or set dropbox_base to the project root.
+if (user == "josep") {
+  dropbox_base <- "C:/Users/josep/Dropbox/Predictive Models for SB and NND/Minimalist/unified_dataset_pipeline"
+  onedrive_data <- "C:/Users/josep/OneDrive - London School of Hygiene and Tropical Medicine/LSHTM Grants and Consultancies/Wellcome_Accelerator grant_minorities/Datasets"
+
+} else if (user == "eidejwai") {
+  dropbox_base <- "C:/Users/eidejwai/Dropbox/Predictive Models for SB and NND/Minimalist/unified_dataset_pipeline"
+  onedrive_data <- "C:/Users/eidejwai/OneDrive - London School of Hygiene and Tropical Medicine/LSHTM Grants and Consultancies/Wellcome_Accelerator grant_minorities/Datasets"
+
+} else {
+  # Default: assume running from the project root
+  dropbox_base <- getwd()
+  onedrive_data <- NULL
+  cat("NOTE: Unknown user. Using working directory as project root.\n")
+  cat("      Set dropbox_base manually if paths do not resolve.\n")
+}
+
+# --- Control flag: set FALSE to skip OneDrive copy ---
+copy_to_onedrive <- TRUE
+
+dirs <- list(
+  # DROPBOX: Pipeline base
+  pipeline     = dropbox_base,
+
+  # DROPBOX: DHS working directories
+  dhs          = file.path(dropbox_base, "data", "dhs"),
+  dhs_cache    = file.path(dropbox_base, "data", "dhs", "cache"),
+  dhs_geo      = file.path(dropbox_base, "data", "dhs", "geographic"),
+  dhs_inv      = file.path(dropbox_base, "data", "dhs", "inventories"),
+  dhs_logs     = file.path(dropbox_base, "data", "dhs", "processing_logs"),
+  dhs_checkpts = file.path(dropbox_base, "data", "dhs", "checkpoints"),
+
+  # DROPBOX: Primary output directory
+  output       = file.path(dropbox_base, "outputs", "dhs"),
+
+  # ONEDRIVE: Study data directories (read-only source for main R notebook)
+  data_root    = onedrive_data,
+  master       = file.path(onedrive_data, "master"),
+  ncops        = file.path(onedrive_data, "ncops"),
+  alert        = file.path(onedrive_data, "alert"),
+  precise      = file.path(onedrive_data, "precise"),
+  ptbi         = file.path(onedrive_data, "ptbi"),
+  enindepth    = file.path(onedrive_data, "en-indepth"),
+  whomcs       = file.path(onedrive_data, "whomcs"),
+
+  # ONEDRIVE: Secondary output location (optional copy)
+  output_onedrive = file.path(onedrive_data, "master", "Unified Dataset")
+)
+
+# Create Dropbox directories
+for (d in c(dirs$dhs, dirs$dhs_cache, dirs$dhs_geo, dirs$dhs_inv,
+            dirs$dhs_logs, dirs$dhs_checkpts, dirs$output)) {
+  if (!dir.exists(d)) {
+    dir.create(d, recursive = TRUE)
+    cat(glue("Created: {d}\n"))
+  }
+}
+
+# Create OneDrive output dir only if copy is enabled
+if (copy_to_onedrive && !dir.exists(dirs$output_onedrive)) {
+  dir.create(dirs$output_onedrive, recursive = TRUE)
+}
+
+# Verify
+cat("\n=== DIRECTORY VERIFICATION ===\n")
+cat("--- Dropbox (PRIMARY) ---\n")
+for (nm in c("pipeline", "dhs", "dhs_cache", "dhs_checkpts", "output")) {
+  ok <- if (dir.exists(dirs[[nm]])) "OK" else "MISSING"
+  cat(glue("  {nm}: [{ok}] {dirs[[nm]]}\n"))
+}
+cat("\n--- OneDrive (secondary copy) ---\n")
+for (nm in c("data_root", "master", "output_onedrive")) {
+  ok <- if (dir.exists(dirs[[nm]])) "OK" else "MISSING"
+  cat(glue("  {nm}: [{ok}] {dirs[[nm]]}\n"))
+}
+cat(glue("\nCopy to OneDrive: {copy_to_onedrive}\n"))
+
+# Checkpoint status
+chk_files <- list.files(dirs$dhs_checkpts, pattern = "\\.rds$")
+if (length(chk_files) > 0) {
+  cat(glue("\n>> CHECKPOINTS FOUND ({length(chk_files)} files) - Step 7 will use cached data\n"))
+  cat(glue("   Location: {dirs$dhs_checkpts}\n"))
+  cat(glue("   Last modified: {file.info(file.path(dirs$dhs_checkpts, chk_files[1]))$mtime}\n"))
+} else {
+  cat("\n>> NO CHECKPOINTS - Step 7 will process ALL surveys (6-10 hours)\n")
+}
+```
+
+
+# Step 2: Configure DHS API Credentials
+
+```{r configure-rdhs, eval=FALSE}
+# ============================================================================
+# CONFIGURE DHS API CREDENTIALS (run ONCE)
+# ============================================================================
+# Register at: https://dhsprogram.com/data/new-user-registration.cfm
+# ============================================================================
+
+# Create config file if it doesn't exist
+rdhs_config_file <- file.path(dirs$dhs, "rdhs.json")
+if (!file.exists(rdhs_config_file)) file.create(rdhs_config_file)
+
+set_rdhs_config(
+  email = "joseph.waiswa@lshtm.ac.uk",
+  project = "Predictive Modelling for stillbirths and neonatal deaths in Sub-Saharan Africa",
+  config_path = rdhs_config_file,
+  cache_path = dirs$dhs_cache,
+  global = FALSE,
+  verbose_download = TRUE
+)
+
+cat("DHS API credentials configured successfully.\n")
+cat(glue("Config saved at: {rdhs_config_file}\n"))
+cat(glue("Cache path: {dirs$dhs_cache}\n"))
+```
+
+
+# Step 3: Identify Sub-Saharan African DHS Surveys
+
+```{r define-ssa-countries}
+# ============================================================================
+# DEFINE SUB-SAHARAN AFRICAN COUNTRIES (DHS country codes)
+# ============================================================================
+
+ssa_country_codes <- c(
+  "AO",  # Angola
+  "BJ",  # Benin
+  "BF",  # Burkina Faso
+  "BU",  # Burundi
+  "CM",  # Cameroon
+  "CV",  # Cape Verde
+  "CF",  # Central African Republic
+  "TD",  # Chad
+  "KM",  # Comoros
+  "CD",  # Congo Democratic Republic
+  "CG",  # Congo (Brazzaville)
+  "CI",  # Cote d'Ivoire
+  "ER",  # Eritrea
+  "ET",  # Ethiopia
+  "GA",  # Gabon
+  "GM",  # Gambia
+  "GH",  # Ghana
+  "GN",  # Guinea
+  "GU",  # Guinea-Bissau
+  "KE",  # Kenya
+  "LS",  # Lesotho
+  "LB",  # Liberia
+  "MD",  # Madagascar
+  "MW",  # Malawi
+  "ML",  # Mali
+  "MR",  # Mauritania
+  "MZ",  # Mozambique
+  "NM",  # Namibia
+  "NI",  # Niger
+  "NG",  # Nigeria
+  "RW",  # Rwanda
+  "ST",  # Sao Tome and Principe
+  "SN",  # Senegal
+  "SL",  # Sierra Leone
+  "ZA",  # South Africa
+  "SD",  # Sudan
+  "SZ",  # Eswatini (Swaziland)
+  "TZ",  # Tanzania
+  "TG",  # Togo
+  "UG",  # Uganda
+  "ZM",  # Zambia
+  "ZW"   # Zimbabwe
+)
+
+cat(glue("{length(ssa_country_codes)} SSA countries defined\n"))
+```
+
+```{r query-surveys, eval=FALSE}
+# ============================================================================
+# QUERY ALL AVAILABLE SSA DHS SURVEYS
+# ============================================================================
+
+all_surveys <- dhs_surveys()
+
+ssa_surveys <- all_surveys %>%
+  filter(
+    DHS_CountryCode %in% ssa_country_codes,
+    SurveyType == "DHS"
+  ) %>%
+  arrange(CountryName, SurveyYear)
+
+cat(glue("\n=== SSA DHS SURVEY INVENTORY ===\n"))
+cat(glue("Total SSA DHS surveys found: {nrow(ssa_surveys)}\n"))
+cat(glue("Countries: {n_distinct(ssa_surveys$CountryName)}\n"))
+cat(glue("Year range: {min(ssa_surveys$SurveyYear)} - {max(ssa_surveys$SurveyYear)}\n\n"))
+
+survey_summary <- ssa_surveys %>%
+  group_by(CountryName, DHS_CountryCode) %>%
+  summarise(
+    n_surveys = n(),
+    years = paste(SurveyYear, collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_surveys))
+
+print(survey_summary, n = 50)
+
+write.csv(ssa_surveys, file.path(dirs$dhs_inv, "dhs_ssa_survey_inventory.csv"), row.names = FALSE)
+```
+
+```{r query-datasets, eval=FALSE}
+# ============================================================================
+# IDENTIFY REQUIRED DATASET FILES
+# ============================================================================
+
+all_datasets <- dhs_datasets()
+
+ssa_datasets <- all_datasets %>%
+  filter(
+    DHS_CountryCode %in% ssa_country_codes,
+    SurveyType == "DHS",
+    FileType %in% c(
+      "Births Recode",
+      "Individual Recode",
+      "Household Recode",
+      "Geographic Data",
+      "Pregnancy Recode"
+    ),
+    # v7.2 FIX: Geographic Data files are shapefiles, NOT Stata .dta format.
+    # The old filter (FileFormat == "Stata dataset (.dta)") excluded all GE files,
+    # which is why no GPS coordinates were available for DHS records.
+    # Fix: include Geographic Data regardless of FileFormat.
+    (FileFormat == "Stata dataset (.dta)" | FileType == "Geographic Data")
+  )
+
+cat(glue("\n=== DATASET FILES AVAILABLE ===\n"))
+cat(glue("Total dataset files: {nrow(ssa_datasets)}\n\n"))
+ssa_datasets %>% count(FileType) %>% arrange(desc(n)) %>% print()
+
+# Which surveys have both BR + IR (minimum for analysis)
+survey_file_coverage <- ssa_datasets %>%
+  group_by(SurveyId, CountryName, SurveyYear) %>%
+  summarise(
+    has_BR = any(FileType == "Births Recode"),
+    has_IR = any(FileType == "Individual Recode"),
+    has_GE = any(FileType == "Geographic Data"),
+    has_GR = any(FileType == "Pregnancy Recode"),
+    n_files = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(CountryName, SurveyYear)
+
+complete_surveys <- survey_file_coverage %>%
+  filter(has_BR & has_IR)
+
+cat(glue("\nSurveys with both BR and IR: {nrow(complete_surveys)}\n"))
+cat(glue("Surveys also with GPS data:  {sum(complete_surveys$has_GE)}\n"))
+cat(glue("Surveys with Pregnancy Recode: {sum(complete_surveys$has_GR)}\n"))
+
+write.csv(ssa_datasets, file.path(dirs$dhs_inv, "dhs_ssa_dataset_inventory.csv"), row.names = FALSE)
+write.csv(complete_surveys, file.path(dirs$dhs_inv, "dhs_complete_surveys.csv"), row.names = FALSE)
+```
+
+
+# Step 4: Download DHS Datasets
+
+```{r download-datasets, eval=FALSE}
+# ============================================================================
+# DOWNLOAD DATASETS (rdhs caches — re-running is safe & skips existing)
+# ============================================================================
+
+download_files <- ssa_datasets %>%
+  filter(
+    SurveyId %in% complete_surveys$SurveyId,
+    FileType %in% c("Births Recode", "Individual Recode", "Geographic Data")
+  )
+
+cat(glue("Downloading {nrow(download_files)} dataset files...\n"))
+cat("This may take several hours on first run. rdhs caches downloads.\n\n")
+
+downloaded <- get_datasets(download_files$FileName)
+
+cat(glue("\nDownload complete. {length(downloaded)} files in cache.\n"))
+cat(glue("Cache location: {dirs$dhs_cache}\n"))
+```
+
+
+## Step 4b: Extract GE Shapefiles to Geographic Directory (v7.2 addition)
+
+```{r extract-ge-files, eval=FALSE}
+# ============================================================================
+# v7.2 FIX: COPY GE SHAPEFILES FROM rdhs CACHE TO GEOGRAPHIC DIRECTORY
+# ============================================================================
+# rdhs downloads GE files to its cache directory, but Step 8 looks for
+# shapefiles in dirs$dhs_geo. This step copies them to the right location.
+# ============================================================================
+
+cat("--- Extracting GE shapefiles to geographic directory ---\n")
+
+# Get GE file entries from the download list
+ge_download_files <- download_files %>%
+  filter(FileType == "Geographic Data")
+
+if (nrow(ge_download_files) > 0) {
+  cat(glue("Found {nrow(ge_download_files)} GE datasets to process\n\n"))
+
+  n_copied <- 0
+
+  for (i in 1:nrow(ge_download_files)) {
+    ge_filename <- ge_download_files$FileName[i]
+    ge_stem <- gsub("\\.ZIP$", "", ge_filename, ignore.case = TRUE)
+
+    # rdhs stores downloaded files in cache/datasets/ directory
+    # Look for extracted shapefile components
+    cache_datasets_dir <- file.path(dirs$dhs_cache, "datasets")
+
+    # Search for shapefile components matching this GE file stem
+    # GE filenames follow pattern: XXGE##FL (e.g., ETGE81FL)
+    ge_pattern <- gsub("DT", "FL", ge_stem)  # Sometimes naming varies
+
+    # Search in cache for any shapefile components
+    shp_components <- list.files(
+      cache_datasets_dir,
+      pattern = paste0(ge_stem, "\\.(shp|shx|dbf|prj|cpg|sbn|sbx)$"),
+      full.names = TRUE, ignore.case = TRUE, recursive = TRUE
+    )
+
+    # Also check if rdhs saved it as .rds (it reads shapefiles too)
+    rds_path <- file.path(cache_datasets_dir, paste0(ge_stem, ".rds"))
+
+    if (length(shp_components) > 0) {
+      # Copy shapefile components to geographic directory
+      for (src in shp_components) {
+        dst <- file.path(dirs$dhs_geo, basename(src))
+        file.copy(src, dst, overwrite = TRUE)
+      }
+      n_copied <- n_copied + 1
+      cat(glue("  {ge_stem}: copied {length(shp_components)} files\n"))
+
+    } else if (file.exists(rds_path)) {
+      # rdhs may have read the shapefile and saved as .rds
+      # Read it and write as shapefile to geographic directory
+      tryCatch({
+        geo_data <- readRDS(rds_path)
+        if (inherits(geo_data, "sf") || inherits(geo_data, "SpatialPointsDataFrame")) {
+          if (!inherits(geo_data, "sf")) geo_data <- sf::st_as_sf(geo_data)
+          shp_out <- file.path(dirs$dhs_geo, paste0(ge_stem, ".shp"))
+          sf::st_write(geo_data, shp_out, delete_dsn = TRUE, quiet = TRUE)
+          n_copied <- n_copied + 1
+          cat(glue("  {ge_stem}: converted from .rds to .shp\n"))
+        }
+      }, error = function(e) {
+        cat(glue("  {ge_stem}: could not convert - {e$message}\n"))
+      })
+    } else {
+      cat(glue("  {ge_stem}: not found in cache\n"))
+    }
+  }
+
+  cat(glue("\nGE extraction complete: {n_copied}/{nrow(ge_download_files)} files copied\n"))
+
+  # Verify
+  shp_in_geo <- list.files(dirs$dhs_geo, pattern = "\\.shp$", recursive = TRUE)
+  cat(glue("Shapefiles now in geographic directory: {length(shp_in_geo)}\n"))
+
+} else {
+  cat("No GE files in download list. Check Step 3 query results.\n")
+}
+```
+
+
+# Step 5: Define Helper Functions
+
+```{r helper-functions}
+# ============================================================================
+# CORE HELPER FUNCTIONS
+# ============================================================================
+
+# --- Safe numeric extraction ---
+safe_extract <- function(df, varname, default = NA_real_) {
+  if (varname %in% names(df)) {
+    x <- df[[varname]]
+    if (is.labelled(x)) x <- zap_labels(x)
+    as.numeric(x)
+  } else {
+    rep(default, nrow(df))
+  }
+}
+
+# --- Safe character extraction ---
+safe_extract_chr <- function(df, varname, default = NA_character_) {
+  if (varname %in% names(df)) {
+    x <- df[[varname]]
+    if (is.labelled(x)) {
+      as.character(as_factor(x))
+    } else {
+      as.character(x)
+    }
+  } else {
+    rep(default, nrow(df))
+  }
+}
+
+# --- DHS country code to full name ---
+dhs_country_name <- function(code2) {
+  dhs_map <- c(
+    "AO"="Angola", "BJ"="Benin", "BF"="Burkina Faso", "BU"="Burundi",
+    "CM"="Cameroon", "CV"="Cape Verde", "CF"="Central African Republic",
+    "TD"="Chad", "KM"="Comoros", "CD"="Congo Democratic Republic",
+    "CG"="Congo", "CI"="Cote d'Ivoire", "ER"="Eritrea", "ET"="Ethiopia",
+    "GA"="Gabon", "GM"="Gambia", "GH"="Ghana", "GN"="Guinea",
+    "GU"="Guinea-Bissau", "KE"="Kenya", "LS"="Lesotho", "LB"="Liberia",
+    "MD"="Madagascar", "MW"="Malawi", "ML"="Mali", "MR"="Mauritania",
+    "MZ"="Mozambique", "NM"="Namibia", "NI"="Niger", "NG"="Nigeria",
+    "RW"="Rwanda", "ST"="Sao Tome and Principe", "SN"="Senegal",
+    "SL"="Sierra Leone", "ZA"="South Africa", "SD"="Sudan",
+    "SZ"="Eswatini", "TZ"="Tanzania", "TG"="Togo", "UG"="Uganda",
+    "ZM"="Zambia", "ZW"="Zimbabwe"
+  )
+  code2_clean <- substr(code2, 1, 2)
+  unname(dhs_map[code2_clean])
+}
+
+# --- Find .rds file in rdhs cache from ZIP filename ---
+find_rds <- function(zip_filename, cache_dir) {
+  stem <- gsub("\\.ZIP$", "", zip_filename, ignore.case = TRUE)
+  # rdhs stores in datasets/ subfolder
+  rds_path <- file.path(cache_dir, "datasets", paste0(stem, ".rds"))
+  if (file.exists(rds_path)) return(rds_path)
+  # Case-insensitive fallback
+  all_rds <- list.files(file.path(cache_dir, "datasets"), pattern = "\\.rds$", full.names = TRUE)
+  match_idx <- which(toupper(basename(all_rds)) == toupper(paste0(stem, ".rds")))
+  if (length(match_idx) > 0) return(all_rds[match_idx[1]])
+  return(NULL)
+}
+
+cat("Helper functions defined\n")
+```
+
+
+# Step 6: Define Processing Functions
+
+## 6a: Classify DHS Survey
+
+```{r classify-survey}
+# ============================================================================
+# CLASSIFY DHS SURVEY TYPE
+# ============================================================================
+# Determines: module type, pregnancy history availability, stillbirth method
+
+classify_dhs_survey <- function(ir_data, survey_id, survey_year) {
+  ir_names <- names(ir_data)
+  
+  # Check for pregnancy history (p32 = birth outcome)
+  has_preg_history <- any(grepl("^p32_", ir_names))
+  preg_history_type <- "none"
+  
+  if (has_preg_history) {
+    if (survey_year >= 2018) {
+      preg_history_type <- "dhs8_standard"
+    } else {
+      preg_history_type <- "pre_dhs8_experimental"
+    }
+  }
+  
+  # Check for contraceptive calendar
+  has_calendar <- "vcal_1" %in% ir_names
+  
+  # Determine module and stillbirth method
+  if (has_preg_history) {
+    module <- "Full pregnancy history"
+    sb_method <- "pregnancy_history"
+  } else if (has_calendar) {
+    module <- "Birth history + calendar"
+    sb_method <- "calendar"
+  } else {
+    module <- "Birth history only"
+    sb_method <- "none"
+  }
+  
+  cat(glue("  Survey: {survey_id} ({survey_year})\n"))
+  cat(glue("    Module: {module}\n"))
+  cat(glue("    Pregnancy history: {has_preg_history}"))
+  if (has_preg_history) cat(glue(" ({length(grep('^p32_', ir_names))} pregnancy slots)"))
+  cat("\n")
+  cat(glue("    Calendar: {has_calendar}\n"))
+  cat(glue("    Stillbirth method: {sb_method}\n"))
+  
+  return(list(
+    module = module,
+    has_preg_history = has_preg_history,
+    preg_history_type = preg_history_type,
+    has_calendar = has_calendar,
+    sb_method = sb_method
+  ))
+}
+
+cat("Survey classification function defined\n")
+```
+
+## 6b: Process Birth Recode File
+
+```{r process-br-file}
+# ============================================================================
+# PROCESS BIRTH RECODE (BR) FILE — One record per live birth
+# ============================================================================
+
+process_br_file <- function(br_data, survey_id, survey_year, module = "Birth history + calendar") {
+  
+  cat(glue("  Processing BR file: {survey_id} ({nrow(br_data)} births)\n"))
+  
+  br_num <- br_data %>% mutate(across(where(is.labelled), zap_labels))
+  
+  result <- tibble(
+    # --- IDENTIFIERS ---
+    study_source = "DHS",
+    study_design = "Population-based",
+    module = module,
+    study_id = paste0("DHS_", survey_id, "_", seq_len(nrow(br_num))),
+    dhs_survey_id = survey_id,
+    studyyear = survey_year,
+    dhs_cluster = safe_extract(br_num, "v001"),
+    dhs_caseid = if ("caseid" %in% names(br_num)) as.character(br_num$caseid) else NA_character_,
+    dhs_weight = safe_extract(br_num, "v005") / 1000000,
+    
+    # --- SECTION 1: OUTCOMES ---
+    out_livebirth = "Yes",
+    out_stillbirth = "No",
+    
+    out_nnd = {
+      b6_raw <- safe_extract(br_num, "b6")
+      b7_raw <- safe_extract(br_num, "b7")
+      case_when(
+        !is.na(b6_raw) & b6_raw >= 100 & b6_raw <= 128 ~ "Yes",  # Died day 0-28
+        !is.na(b7_raw) & b7_raw == 0 ~ "Yes",                     # Died in month 0
+        b5_alive <- safe_extract(br_num, "b5"),
+        !is.na(b5_alive) & b5_alive == 0 & !is.na(b7_raw) & b7_raw == 0 ~ "Yes",
+        TRUE ~ "No"
+      )
+    },
+    
+    out_nnd_early = {
+      b6_raw <- safe_extract(br_num, "b6")
+      case_when(
+        !is.na(b6_raw) & b6_raw >= 100 & b6_raw <= 107 ~ "Yes",
+        TRUE ~ NA_character_
+      )
+    },
+    
+    out_nnd_late = {
+      b6_raw <- safe_extract(br_num, "b6")
+      case_when(
+        !is.na(b6_raw) & b6_raw >= 108 & b6_raw <= 128 ~ "Yes",
+        TRUE ~ NA_character_
+      )
+    },
+    
+    out_infant_sex = case_when(
+      safe_extract(br_num, "b4") == 1 ~ "Male",
+      safe_extract(br_num, "b4") == 2 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+    
+    out_birthweight_g = {
+      bw <- safe_extract(br_num, "m19")
+      if_else(!is.na(bw) & bw >= 500 & bw < 9000, bw, NA_real_)
+    },
+    
+    out_ga_weeks = NA_real_,  # Enriched later from IR data
+    out_ga_method = NA_character_,
+    
+    out_dob = safe_extract(br_num, "b3"),  # CMC date
+    
+    out_ageatdeath = {
+      b6_raw <- safe_extract(br_num, "b6")
+      case_when(
+        !is.na(b6_raw) & b6_raw >= 100 & b6_raw <= 128 ~ b6_raw - 100,
+        TRUE ~ NA_real_
+      )
+    },
+    
+    out_multiple = case_when(
+      safe_extract(br_num, "b0") == 0 ~ "Singleton",
+      safe_extract(br_num, "b0") >= 1 ~ "Multiple",
+      TRUE ~ NA_character_
+    ),
+    
+    out_apgar_1min = NA_real_,
+    out_apgar_5min = NA_real_,
+    out_apgar_10min = NA_real_,
+    out_sga = NA_character_,
+    
+    # --- SECTION 2: MATERNAL DEMOGRAPHICS ---
+    mat_age = safe_extract(br_num, "v012"),
+    
+    mat_education = case_when(
+      safe_extract(br_num, "v106") == 0 ~ "None",
+      safe_extract(br_num, "v106") == 1 ~ "Primary",
+      safe_extract(br_num, "v106") == 2 ~ "Secondary",
+      safe_extract(br_num, "v106") == 3 ~ "Higher",
+      TRUE ~ NA_character_
+    ),
+    
+    mat_education_years = safe_extract(br_num, "v133"),
+    
+    mat_marital_status = case_when(
+      safe_extract(br_num, "v501") == 0 ~ "Single",
+      safe_extract(br_num, "v501") %in% c(1, 2) ~ "Married-Cohabiting",
+      safe_extract(br_num, "v501") == 3 ~ "Widowed",
+      safe_extract(br_num, "v501") %in% c(4, 5) ~ "Divorced-Separated",
+      TRUE ~ NA_character_
+    ),
+    
+    mat_religion = safe_extract_chr(br_num, "v130"),
+    
+    mat_occupation = safe_extract_chr(br_num, "v717"),
+    
+    mat_urban_rural = case_when(
+      safe_extract(br_num, "v025") == 1 ~ "Urban",
+      safe_extract(br_num, "v025") == 2 ~ "Rural",
+      TRUE ~ NA_character_
+    ),
+    
+    mat_country = sapply(safe_extract_chr(br_num, "v000"), function(x) {
+      nm <- dhs_country_name(x)
+      if (is.na(nm)) x else nm
+    }, USE.NAMES = FALSE),
+    
+    mat_parity = safe_extract(br_num, "v220"),
+    mat_gravidity = safe_extract(br_num, "v201"),
+    
+    # --- SECTION 3: HOUSEHOLD/SES ---
+    hh_wealth_quintile = case_when(
+      safe_extract(br_num, "v190") == 1 ~ "Poorest",
+      safe_extract(br_num, "v190") == 2 ~ "Poorer",
+      safe_extract(br_num, "v190") == 3 ~ "Middle",
+      safe_extract(br_num, "v190") == 4 ~ "Richer",
+      safe_extract(br_num, "v190") == 5 ~ "Richest",
+      TRUE ~ NA_character_
+    ),
+    
+    hh_asset_score = safe_extract(br_num, "v191"),
+    
+    # --- SECTION 7: ANC ---
+    anc_visits = safe_extract(br_num, "m14"),
+    anc_provider = safe_extract_chr(br_num, "m2a"),
+    anc_timing_months = safe_extract(br_num, "m13"),
+    
+    # --- SECTION 8: MATERNAL HEALTH ---
+    mat_height_cm = safe_extract(br_num, "v438") / 10,  # Stored as mm
+    mat_weight_kg = safe_extract(br_num, "v437") / 10,  # Stored as 0.1kg
+    mat_bmi = safe_extract(br_num, "v445") / 100,        # Stored as 0.01
+    mat_hiv_status = safe_extract_chr(br_num, "v781"),
+    mat_anaemia = safe_extract_chr(br_num, "v457"),
+    
+    # --- SECTION 9: DELIVERY ---
+    del_mode = case_when(
+      safe_extract(br_num, "m17") == 1 ~ "Caesarean",
+      safe_extract(br_num, "m17") == 0 ~ "Vaginal",
+      TRUE ~ NA_character_
+    ),
+    
+    del_location = safe_extract_chr(br_num, "m15"),
+    del_attendant = safe_extract_chr(br_num, "m3a"),
+    
+    # --- SECTION 11: NEONATAL CARE ---
+    neo_breastfeeding = safe_extract_chr(br_num, "m4"),
+    neo_early_bf = case_when(
+      safe_extract(br_num, "m34") == 0 ~ "Immediate",
+      safe_extract(br_num, "m34") <= 1 ~ "Within 1 hour",
+      TRUE ~ NA_character_
+    )
+  )
+  
+  # Fix NND calculation (redo properly after tibble creation)
+  b5_vals <- safe_extract(br_num, "b5")
+  b6_vals <- safe_extract(br_num, "b6")
+  b7_vals <- safe_extract(br_num, "b7")
+  
+  result$out_nnd <- case_when(
+    !is.na(b6_vals) & b6_vals >= 100 & b6_vals <= 128 ~ "Yes",
+    !is.na(b5_vals) & b5_vals == 0 & !is.na(b7_vals) & b7_vals == 0 ~ "Yes",
+    !is.na(b5_vals) & b5_vals == 1 ~ "No",
+    !is.na(b5_vals) & b5_vals == 0 & !is.na(b7_vals) & b7_vals > 0 ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  result$out_nnd_early <- case_when(
+    !is.na(b6_vals) & b6_vals >= 100 & b6_vals <= 107 ~ "Yes",
+    result$out_nnd == "Yes" & (is.na(b6_vals) | b6_vals > 107) ~ "No",
+    result$out_nnd == "No" ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  result$out_nnd_late <- case_when(
+    !is.na(b6_vals) & b6_vals >= 108 & b6_vals <= 128 ~ "Yes",
+    result$out_nnd == "Yes" & (is.na(b6_vals) | b6_vals < 108) ~ "No",
+    result$out_nnd == "No" ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  # Derive: stillbirth flags (all No for BR file live births)
+  result$out_stillbirth_28wks <- "No"
+  result$out_stillbirth_20wks <- "No"
+  
+  # Derive: perinatal death
+  result$out_perinatal_death <- case_when(
+    result$out_nnd_early == "Yes" ~ "Yes",
+    result$out_nnd_early == "No" ~ "No",
+    TRUE ~ NA_character_
+  )
+  
+  cat(glue("  Extracted {nrow(result)} live births, {sum(result$out_nnd == 'Yes', na.rm=TRUE)} NNDs\n"))
+  
+  return(result)
+}
+
+cat("process_br_file function defined\n")
+```
+
+## 6c: Extract Stillbirths from Pregnancy History
+
+```{r extract-stillbirths-preg-history}
+# ============================================================================
+# EXTRACT STILLBIRTHS FROM PREGNANCY HISTORY (DHS-8 or pre-DHS-8 with p32)
+# ============================================================================
+
+extract_stillbirths_preg_history <- function(ir_data, survey_id, survey_year, module = "Full pregnancy history") {
+  
+  cat(glue("  Extracting pregnancy history stillbirths: {survey_id}\n"))
+  
+  has_p32 <- any(grepl("^p32_", names(ir_data)))
+  if (!has_p32) {
+    cat("  No pregnancy history (p32) variables found.\n")
+    return(NULL)
+  }
+  
+  ir_num <- ir_data %>% mutate(across(where(is.labelled), zap_labels))
+  
+  # Find all pregnancy slots
+  p32_vars <- sort(grep("^p32_", names(ir_num), value = TRUE))
+  p20_vars <- sort(grep("^p20_", names(ir_num), value = TRUE))
+  
+  sb_records <- list()
+  
+  for (slot_idx in seq_along(p32_vars)) {
+    p32_var <- p32_vars[slot_idx]
+    p20_var <- if (slot_idx <= length(p20_vars)) p20_vars[slot_idx] else NULL
+    
+    # p32 == 2 means "born dead" (stillbirth)
+    p32_vals <- ir_num[[p32_var]]
+    is_stillbirth <- !is.na(p32_vals) & p32_vals == 2
+    
+    if (sum(is_stillbirth) == 0) next
+    
+    sb_subset <- ir_num[is_stillbirth, ]
+    
+    # Get GA from p20 (pregnancy duration)
+    # Coding: 100-150 = weeks (subtract 100), 200-211 = months (subtract 200)
+    ga_weeks <- NA_real_
+    if (!is.null(p20_var) && p20_var %in% names(sb_subset)) {
+      p20_vals <- sb_subset[[p20_var]]
+      ga_weeks <- case_when(
+        !is.na(p20_vals) & p20_vals >= 100 & p20_vals <= 150 ~ p20_vals - 100,
+        !is.na(p20_vals) & p20_vals >= 200 & p20_vals <= 211 ~ (p20_vals - 200) * 4.33,
+        TRUE ~ NA_real_
+      )
+    }
+    
+    sb_records[[length(sb_records) + 1]] <- tibble(
+      study_source = "DHS",
+      study_design = "Population-based",
+      module = module,
+      study_id = paste0("DHS_", survey_id, "_PH_SB_", slot_idx, "_", seq_len(nrow(sb_subset))),
+      dhs_survey_id = survey_id,
+      studyyear = survey_year,
+      dhs_cluster = safe_extract(sb_subset, "v001"),
+      dhs_caseid = if ("caseid" %in% names(sb_subset)) as.character(sb_subset$caseid) else NA_character_,
+      dhs_weight = safe_extract(sb_subset, "v005") / 1000000,
+      
+      out_stillbirth = "Yes",
+      out_livebirth = "No",
+      out_nnd = NA_character_,
+      out_nnd_early = NA_character_,
+      out_nnd_late = NA_character_,
+      out_ga_weeks = ga_weeks,
+      out_stillbirth_28wks = if_else(!is.na(ga_weeks) & ga_weeks >= 28, "Yes",
+                                     if_else(!is.na(ga_weeks), "No", NA_character_)),
+      out_stillbirth_20wks = if_else(!is.na(ga_weeks) & ga_weeks >= 20, "Yes",
+                                     if_else(!is.na(ga_weeks), "No", NA_character_)),
+      out_infant_sex = NA_character_,
+      out_birthweight_g = NA_real_,
+      out_dob = NA,
+      out_multiple = NA_character_,
+      out_apgar_1min = NA_real_,
+      out_apgar_5min = NA_real_,
+      out_apgar_10min = NA_real_,
+      out_ageatdeath = NA_real_,
+      out_sga = NA_character_,
+      out_perinatal_death = if_else(!is.na(ga_weeks) & ga_weeks >= 28, "Yes", NA_character_),
+      
+      mat_age = safe_extract(sb_subset, "v012"),
+      mat_education = case_when(
+        safe_extract(sb_subset, "v106") == 0 ~ "None",
+        safe_extract(sb_subset, "v106") == 1 ~ "Primary",
+        safe_extract(sb_subset, "v106") == 2 ~ "Secondary",
+        safe_extract(sb_subset, "v106") == 3 ~ "Higher",
+        TRUE ~ NA_character_
+      ),
+      mat_marital_status = case_when(
+        safe_extract(sb_subset, "v501") == 0 ~ "Single",
+        safe_extract(sb_subset, "v501") %in% c(1, 2) ~ "Married-Cohabiting",
+        safe_extract(sb_subset, "v501") == 3 ~ "Widowed",
+        safe_extract(sb_subset, "v501") %in% c(4, 5) ~ "Divorced-Separated",
+        TRUE ~ NA_character_
+      ),
+      mat_urban_rural = case_when(
+        safe_extract(sb_subset, "v025") == 1 ~ "Urban",
+        safe_extract(sb_subset, "v025") == 2 ~ "Rural",
+        TRUE ~ NA_character_
+      ),
+      mat_country = sapply(safe_extract_chr(sb_subset, "v000"), function(x) {
+        nm <- dhs_country_name(x)
+        if (is.na(nm)) x else nm
+      }, USE.NAMES = FALSE),
+      
+      hh_wealth_quintile = case_when(
+        safe_extract(sb_subset, "v190") == 1 ~ "Poorest",
+        safe_extract(sb_subset, "v190") == 2 ~ "Poorer",
+        safe_extract(sb_subset, "v190") == 3 ~ "Middle",
+        safe_extract(sb_subset, "v190") == 4 ~ "Richer",
+        safe_extract(sb_subset, "v190") == 5 ~ "Richest",
+        TRUE ~ NA_character_
+      ),
+      hh_asset_score = safe_extract(sb_subset, "v191")
+    )
+  }
+  
+  if (length(sb_records) > 0) {
+    result <- bind_rows(sb_records)
+    cat(glue("  Pregnancy history stillbirths extracted: {nrow(result)}\n"))
+    return(result)
+  } else {
+    cat("  No pregnancy history stillbirths found\n")
+    return(NULL)
+  }
+}
+
+cat("extract_stillbirths_preg_history function defined\n")
+```
+
+## 6d: Extract Stillbirths from Calendar
+
+```{r extract-stillbirths-calendar}
+# ============================================================================
+# EXTRACT STILLBIRTHS FROM CONTRACEPTIVE CALENDAR (DHS-7 and earlier)
+# ============================================================================
+# vcal_1: Character string of monthly codes, most recent month first
+# "B" = birth, "T" = termination, "P" = pregnant
+# Stillbirth = "T" preceded by 7+ months of "P"
+# ============================================================================
+
+extract_stillbirths_calendar <- function(ir_data, survey_id, survey_year) {
+  
+  cat(glue("  Extracting calendar stillbirths: {survey_id}\n"))
+  
+  if (!"vcal_1" %in% names(ir_data)) {
+    cat("  No contraceptive calendar (vcal_1) found.\n")
+    return(NULL)
+  }
+  
+  ir_num <- ir_data %>% mutate(across(where(is.labelled), zap_labels))
+  
+  sb_records <- list()
+  
+  for (i in seq_len(nrow(ir_num))) {
+    cal <- as.character(ir_num$vcal_1[i])
+    if (is.na(cal) || nchar(cal) < 12) next
+    
+    t_positions <- gregexpr("T", cal)[[1]]
+    if (t_positions[1] == -1) next
+    
+    for (t_pos in t_positions) {
+      preg_months <- 0
+      check_pos <- t_pos + 1
+      while (check_pos <= nchar(cal) && substr(cal, check_pos, check_pos) == "P") {
+        preg_months <- preg_months + 1
+        check_pos <- check_pos + 1
+      }
+      
+      # Stillbirth = termination after 6+ months of P (7+ months total pregnancy)
+      if (preg_months >= 6) {
+        sb_records[[length(sb_records) + 1]] <- tibble(
+          study_source = "DHS",
+          study_design = "Population-based",
+          module = "Birth history + calendar",
+          study_id = paste0("DHS_", survey_id, "_CAL_SB_", length(sb_records) + 1),
+          dhs_survey_id = survey_id,
+          studyyear = survey_year,
+          dhs_cluster = safe_extract(ir_num[i, ], "v001"),
+          dhs_caseid = if ("caseid" %in% names(ir_num)) as.character(ir_num$caseid[i]) else NA_character_,
+          dhs_weight = safe_extract(ir_num[i, ], "v005") / 1000000,
+          
+          out_stillbirth = "Yes",
+          out_livebirth = "No",
+          out_nnd = NA_character_,
+          out_nnd_early = NA_character_,
+          out_nnd_late = NA_character_,
+          out_ga_weeks = (preg_months + 1) * 4.33,
+          out_stillbirth_28wks = if_else(preg_months >= 6, "Yes", "No"),
+          out_stillbirth_20wks = "Yes",
+          out_infant_sex = NA_character_,
+          out_birthweight_g = NA_real_,
+          out_dob = NA,
+          out_multiple = NA_character_,
+          out_apgar_1min = NA_real_,
+          out_apgar_5min = NA_real_,
+          out_apgar_10min = NA_real_,
+          out_ageatdeath = NA_real_,
+          out_sga = NA_character_,
+          out_perinatal_death = if_else(preg_months >= 6, "Yes", NA_character_),
+          
+          mat_age = safe_extract(ir_num[i, ], "v012"),
+          mat_education = case_when(
+            safe_extract(ir_num[i, ], "v106") == 0 ~ "None",
+            safe_extract(ir_num[i, ], "v106") == 1 ~ "Primary",
+            safe_extract(ir_num[i, ], "v106") == 2 ~ "Secondary",
+            safe_extract(ir_num[i, ], "v106") == 3 ~ "Higher",
+            TRUE ~ NA_character_
+          ),
+          mat_marital_status = case_when(
+            safe_extract(ir_num[i, ], "v501") == 0 ~ "Single",
+            safe_extract(ir_num[i, ], "v501") %in% c(1, 2) ~ "Married-Cohabiting",
+            safe_extract(ir_num[i, ], "v501") == 3 ~ "Widowed",
+            safe_extract(ir_num[i, ], "v501") %in% c(4, 5) ~ "Divorced-Separated",
+            TRUE ~ NA_character_
+          ),
+          mat_urban_rural = case_when(
+            safe_extract(ir_num[i, ], "v025") == 1 ~ "Urban",
+            safe_extract(ir_num[i, ], "v025") == 2 ~ "Rural",
+            TRUE ~ NA_character_
+          ),
+          mat_country = {
+            v000 <- safe_extract_chr(ir_num[i, ], "v000")
+            nm <- dhs_country_name(v000)
+            if (is.na(nm)) v000 else nm
+          },
+          
+          hh_wealth_quintile = case_when(
+            safe_extract(ir_num[i, ], "v190") == 1 ~ "Poorest",
+            safe_extract(ir_num[i, ], "v190") == 2 ~ "Poorer",
+            safe_extract(ir_num[i, ], "v190") == 3 ~ "Middle",
+            safe_extract(ir_num[i, ], "v190") == 4 ~ "Richer",
+            safe_extract(ir_num[i, ], "v190") == 5 ~ "Richest",
+            TRUE ~ NA_character_
+          ),
+          hh_asset_score = safe_extract(ir_num[i, ], "v191")
+        )
+      }
+    }
+  }
+  
+  if (length(sb_records) > 0) {
+    result <- bind_rows(sb_records)
+    cat(glue("  Calendar stillbirths extracted: {nrow(result)}\n"))
+    return(result)
+  } else {
+    cat("  No calendar stillbirths found\n")
+    return(NULL)
+  }
+}
+
+cat("extract_stillbirths_calendar function defined\n")
+```
+
+## 6e: Enrich BR with GA from IR
+
+```{r enrich-ga}
+# ============================================================================
+# ENRICH LIVE BIRTHS WITH GA FROM PREGNANCY HISTORY
+# ============================================================================
+
+enrich_br_ga_from_preg_history <- function(br_processed, ir_data) {
+  cat("  Enriching BR with GA from pregnancy history...\n")
+  
+  ir_num <- ir_data %>% mutate(across(where(is.labelled), zap_labels))
+  p20_vars <- sort(grep("^p20_", names(ir_num), value = TRUE))
+  p32_vars <- sort(grep("^p32_", names(ir_num), value = TRUE))
+  
+  if (length(p20_vars) == 0 || length(p32_vars) == 0) {
+    cat("    No p20/p32 variables found\n")
+    return(br_processed)
+  }
+  
+  # For each live birth in p32 (p32==1), extract p20 as GA
+  # This is approximate — matching by caseid and birth order
+  ga_enriched <- 0
+  # (Placeholder: full matching logic would go here)
+  
+  cat(glue("    GA enrichment from preg history: {ga_enriched} records\n"))
+  return(br_processed)
+}
+
+enrich_br_ga_from_calendar <- function(br_processed, ir_data) {
+  cat("  Enriching BR with GA from calendar (limited)...\n")
+  # Calendar doesn't directly provide GA for live births
+  return(br_processed)
+}
+
+cat("GA enrichment functions defined\n")
+```
+
+
+# Step 7: Batch Process with Incremental Checkpointing
+
+```{r batch-process}
+# ============================================================================
+# BATCH PROCESS ALL DOWNLOADED SSA SURVEYS — INCREMENTAL CHECKPOINTING
+# ============================================================================
+#
+# HOW IT WORKS:
+#   1. Loads checkpoints if they exist (named lists, one element per survey)
+#   2. Compares checkpoint survey IDs against the current complete_surveys list
+#   3. If ALL surveys are in checkpoints → loads in seconds (FAST PATH)
+#   4. If NEW surveys detected → processes ONLY the new ones (INCREMENTAL)
+#   5. If NO checkpoints → processes everything (FULL PATH, 6-10 hours)
+#   6. Saves/updates checkpoints after processing
+#
+# TO FORCE FULL REPROCESSING:
+#   Run the "clear-checkpoints" chunk at the bottom of this file.
+# ============================================================================
+
+# --- Define checkpoint file paths ---
+checkpoint_br  <- file.path(dirs$dhs_checkpts, "all_br_processed.rds")
+checkpoint_sb  <- file.path(dirs$dhs_checkpts, "all_stillbirths.rds")
+checkpoint_log <- file.path(dirs$dhs_checkpts, "processing_log.rds")
+
+# --- Reload inventories from disk if not in memory ---
+if (!exists("complete_surveys")) {
+  inv_path <- file.path(dirs$dhs_inv, "dhs_complete_surveys.csv")
+  if (file.exists(inv_path)) {
+    complete_surveys <- read.csv(inv_path, stringsAsFactors = FALSE)
+    cat(glue("Reloaded complete_surveys from disk: {nrow(complete_surveys)} surveys\n"))
+  } else {
+    stop("No complete_surveys found. Run Steps 3-4 first (query + download).")
+  }
+}
+
+if (!exists("ssa_datasets")) {
+  inv_path2 <- file.path(dirs$dhs_inv, "dhs_ssa_dataset_inventory.csv")
+  if (file.exists(inv_path2)) {
+    ssa_datasets <- read.csv(inv_path2, stringsAsFactors = FALSE)
+    cat(glue("Reloaded ssa_datasets from disk: {nrow(ssa_datasets)} datasets\n"))
+  } else {
+    stop("No ssa_datasets inventory found. Run Step 3 first.")
+  }
+}
+
+survey_list <- complete_surveys
+
+# --- Check for existing checkpoints ---
+checkpoints_exist <- all(
+  file.exists(checkpoint_br),
+  file.exists(checkpoint_sb),
+  file.exists(checkpoint_log)
+)
+
+if (checkpoints_exist) {
+  # Load existing checkpoints
+  cat(strrep("=", 60), "\n")
+  cat("LOADING EXISTING CHECKPOINTS\n")
+  cat(strrep("=", 60), "\n")
+  cat(glue("  Checkpoint date: {file.info(checkpoint_br)$mtime}\n\n"))
+  
+  all_br_processed <- readRDS(checkpoint_br)
+  all_stillbirths  <- readRDS(checkpoint_sb)
+  processing_log   <- readRDS(checkpoint_log)
+  
+  cached_surveys <- names(all_br_processed)
+  target_surveys <- survey_list$SurveyId
+  new_surveys    <- setdiff(target_surveys, cached_surveys)
+  
+  cat(glue("  Cached surveys: {length(cached_surveys)}\n"))
+  cat(glue("  Target surveys: {length(target_surveys)}\n"))
+  cat(glue("  NEW surveys to process: {length(new_surveys)}\n\n"))
+  
+  if (length(new_surveys) == 0) {
+    # =======================================================================
+    # FAST PATH: All surveys already cached — load and combine
+    # =======================================================================
+    cat("ALL SURVEYS CACHED — skipping processing entirely\n\n")
+    
+  } else {
+    # =======================================================================
+    # INCREMENTAL PATH: Process only new surveys, merge with existing
+    # =======================================================================
+    cat(strrep("=", 60), "\n")
+    cat(glue("INCREMENTAL UPDATE: Processing {length(new_surveys)} new surveys\n"))
+    cat(strrep("=", 60), "\n\n")
+    
+    new_survey_list <- survey_list %>% filter(SurveyId %in% new_surveys)
+    
+    n_rds <- length(list.files(file.path(dirs$dhs_cache, "datasets"), pattern = "\\.rds$"))
+    cat(glue("Found {n_rds} .rds files in cache\n\n"))
+    
+    for (i in seq_len(nrow(new_survey_list))) {
+      sid     <- new_survey_list$SurveyId[i]
+      syear   <- new_survey_list$SurveyYear[i]
+      country <- new_survey_list$CountryName[i]
+      
+      cat(glue("\n{strrep('=', 60)}\n"))
+      cat(glue("[NEW] Processing: {country} {syear} ({sid}) [{i}/{nrow(new_survey_list)}]\n"))
+      cat(glue("{strrep('=', 60)}\n"))
+      
+      tryCatch({
+        # Load IR
+        ir_filename <- ssa_datasets %>%
+          filter(SurveyId == sid, FileType == "Individual Recode") %>%
+          pull(FileName)
+        
+        ir_data <- NULL
+        survey_class <- list(module = "Birth history only", sb_method = "none")
+        
+        if (length(ir_filename) > 0) {
+          ir_path <- find_rds(ir_filename[1], dirs$dhs_cache)
+          if (!is.null(ir_path)) {
+            cat(glue("  Loading IR: {basename(ir_path)}\n"))
+            ir_data <- readRDS(ir_path)
+            survey_class <- classify_dhs_survey(ir_data, sid, syear)
+          }
+        }
+        
+        # Load and process BR
+        br_filename <- ssa_datasets %>%
+          filter(SurveyId == sid, FileType == "Births Recode") %>%
+          pull(FileName)
+        
+        if (length(br_filename) > 0) {
+          br_path <- find_rds(br_filename[1], dirs$dhs_cache)
+          if (!is.null(br_path)) {
+            cat(glue("  Loading BR: {basename(br_path)}\n"))
+            br_data <- readRDS(br_path)
+            br_processed <- process_br_file(br_data, sid, syear, module = survey_class$module)
+            
+            if (!is.null(ir_data)) {
+              if (survey_class$sb_method == "pregnancy_history") {
+                br_processed <- enrich_br_ga_from_preg_history(br_processed, ir_data)
+              } else if (survey_class$sb_method == "calendar") {
+                br_processed <- enrich_br_ga_from_calendar(br_processed, ir_data)
+              }
+            }
+            
+            all_br_processed[[sid]] <- br_processed
+          }
+        }
+        
+        # Extract stillbirths
+        if (!is.null(ir_data)) {
+          if (survey_class$sb_method == "pregnancy_history") {
+            sb <- extract_stillbirths_preg_history(ir_data, sid, syear, module = survey_class$module)
+            if (!is.null(sb)) all_stillbirths[[sid]] <- sb
+          } else if (survey_class$sb_method == "calendar") {
+            sb_cal <- extract_stillbirths_calendar(ir_data, sid, syear)
+            if (!is.null(sb_cal)) all_stillbirths[[sid]] <- sb_cal
+          }
+        }
+        
+        processing_log[[sid]] <- list(
+          survey_id = sid, country = country, year = syear,
+          status = "success", module = survey_class$module,
+          sb_method = survey_class$sb_method,
+          n_births = if (!is.null(all_br_processed[[sid]])) nrow(all_br_processed[[sid]]) else 0,
+          n_stillbirths = if (!is.null(all_stillbirths[[sid]])) nrow(all_stillbirths[[sid]]) else 0
+        )
+        
+      }, error = function(e) {
+        cat(glue("  ERROR: {e$message}\n"))
+        processing_log[[sid]] <<- list(
+          survey_id = sid, country = country, year = syear,
+          status = "error", error_msg = e$message,
+          module = NA_character_, sb_method = NA_character_
+        )
+      })
+      
+      if (exists("ir_data")) rm(ir_data)
+      if (exists("br_data")) rm(br_data)
+      gc(verbose = FALSE)
+    }
+    
+    # Save UPDATED checkpoints
+    cat(glue("\n\nSaving updated checkpoints ({length(all_br_processed)} surveys)...\n"))
+    saveRDS(all_br_processed, checkpoint_br)
+    saveRDS(all_stillbirths, checkpoint_sb)
+    saveRDS(processing_log, checkpoint_log)
+    cat("Updated checkpoints saved.\n")
+  }
+  
+} else {
+  # =========================================================================
+  # FULL PATH: No checkpoints — process ALL surveys (6-10 hours)
+  # =========================================================================
+  cat(strrep("=", 60), "\n")
+  cat("NO CHECKPOINTS FOUND — PROCESSING ALL SURVEYS\n")
+  cat("This will take several hours. Results will be checkpointed.\n")
+  cat(strrep("=", 60), "\n\n")
+  
+  all_br_processed <- list()
+  all_stillbirths  <- list()
+  processing_log   <- list()
+  
+  n_rds <- length(list.files(file.path(dirs$dhs_cache, "datasets"), pattern = "\\.rds$"))
+  cat(glue("Found {n_rds} .rds files in cache/datasets/\n"))
+  cat(glue("Processing {nrow(survey_list)} surveys\n\n"))
+  
+  for (i in seq_len(nrow(survey_list))) {
+    sid     <- survey_list$SurveyId[i]
+    syear   <- survey_list$SurveyYear[i]
+    country <- survey_list$CountryName[i]
+    
+    cat(glue("\n{strrep('=', 60)}\n"))
+    cat(glue("Processing: {country} {syear} ({sid}) [{i}/{nrow(survey_list)}]\n"))
+    cat(glue("{strrep('=', 60)}\n"))
+    
+    tryCatch({
+      # Load IR
+      ir_filename <- ssa_datasets %>%
+        filter(SurveyId == sid, FileType == "Individual Recode") %>%
+        pull(FileName)
+      
+      ir_data <- NULL
+      survey_class <- list(module = "Birth history only", sb_method = "none")
+      
+      if (length(ir_filename) > 0) {
+        ir_path <- find_rds(ir_filename[1], dirs$dhs_cache)
+        if (!is.null(ir_path)) {
+          cat(glue("  Loading IR: {basename(ir_path)}\n"))
+          ir_data <- readRDS(ir_path)
+          survey_class <- classify_dhs_survey(ir_data, sid, syear)
+        }
+      }
+      
+      # Load and process BR
+      br_filename <- ssa_datasets %>%
+        filter(SurveyId == sid, FileType == "Births Recode") %>%
+        pull(FileName)
+      
+      if (length(br_filename) > 0) {
+        br_path <- find_rds(br_filename[1], dirs$dhs_cache)
+        if (!is.null(br_path)) {
+          cat(glue("  Loading BR: {basename(br_path)}\n"))
+          br_data <- readRDS(br_path)
+          br_processed <- process_br_file(br_data, sid, syear, module = survey_class$module)
+          
+          if (!is.null(ir_data)) {
+            if (survey_class$sb_method == "pregnancy_history") {
+              br_processed <- enrich_br_ga_from_preg_history(br_processed, ir_data)
+            } else if (survey_class$sb_method == "calendar") {
+              br_processed <- enrich_br_ga_from_calendar(br_processed, ir_data)
+            }
+          }
+          
+          all_br_processed[[sid]] <- br_processed
+        }
+      }
+      
+      # Extract stillbirths
+      if (!is.null(ir_data)) {
+        if (survey_class$sb_method == "pregnancy_history") {
+          sb <- extract_stillbirths_preg_history(ir_data, sid, syear, module = survey_class$module)
+          if (!is.null(sb)) all_stillbirths[[sid]] <- sb
+        } else if (survey_class$sb_method == "calendar") {
+          sb_cal <- extract_stillbirths_calendar(ir_data, sid, syear)
+          if (!is.null(sb_cal)) all_stillbirths[[sid]] <- sb_cal
+        }
+      }
+      
+      processing_log[[sid]] <- list(
+        survey_id = sid, country = country, year = syear,
+        status = "success", module = survey_class$module,
+        sb_method = survey_class$sb_method,
+        n_births = if (!is.null(all_br_processed[[sid]])) nrow(all_br_processed[[sid]]) else 0,
+        n_stillbirths = if (!is.null(all_stillbirths[[sid]])) nrow(all_stillbirths[[sid]]) else 0
+      )
+      
+    }, error = function(e) {
+      cat(glue("  ERROR: {e$message}\n"))
+      processing_log[[sid]] <<- list(
+        survey_id = sid, country = country, year = syear,
+        status = "error", error_msg = e$message,
+        module = NA_character_, sb_method = NA_character_
+      )
+    })
+    
+    if (exists("ir_data")) rm(ir_data)
+    if (exists("br_data")) rm(br_data)
+    gc(verbose = FALSE)
+  }
+  
+  # Save checkpoints
+  cat(glue("\n\nSaving checkpoints to: {dirs$dhs_checkpts}\n"))
+  saveRDS(all_br_processed, checkpoint_br)
+  saveRDS(all_stillbirths, checkpoint_sb)
+  saveRDS(processing_log, checkpoint_log)
+  cat("Checkpoints saved. Next run will load these instead of reprocessing.\n")
+}
+
+# --- COMBINE (runs in all paths) ---
+dhs_livebirths  <- bind_rows(all_br_processed)
+dhs_stillbirths <- bind_rows(all_stillbirths)
+log_df          <- bind_rows(processing_log)
+
+# --- SUMMARY ---
+cat(glue("\n\n{strrep('=', 60)}\n"))
+cat("PROCESSING SUMMARY\n")
+cat(glue("{strrep('=', 60)}\n"))
+cat(glue("Total live births: {nrow(dhs_livebirths)}\n"))
+cat(glue("Total stillbirths: {nrow(dhs_stillbirths)}\n"))
+cat(glue("Surveys successful: {sum(log_df$status == 'success')}\n"))
+cat(glue("Surveys with errors: {sum(log_df$status == 'error')}\n\n"))
+
+cat("Module classification:\n")
+log_df %>% filter(status == "success") %>% count(module) %>% print()
+```
+
+
+# Steps 8-9: Combine, Link Geographic Data, and Save
+
+```{r combine-link-geo-save}
+# ============================================================================
+# COMBINE LIVE BIRTHS + STILLBIRTHS, LINK GEOGRAPHIC DATA, THEN SAVE
+# ============================================================================
+
+# --- 1. COMBINE ---
+cat(strrep("=", 60), "\n")
+cat("COMBINING AND SAVING DHS UNIFIED DATASET\n")
+cat(strrep("=", 60), "\n\n")
+
+# Align columns
+missing_in_sb <- setdiff(names(dhs_livebirths), names(dhs_stillbirths))
+missing_in_lb <- setdiff(names(dhs_stillbirths), names(dhs_livebirths))
+for (col in missing_in_sb) dhs_stillbirths[[col]] <- NA
+for (col in missing_in_lb) dhs_livebirths[[col]] <- NA
+
+dhs_unified <- bind_rows(dhs_livebirths, dhs_stillbirths)
+
+# Generate unified IDs and perinatal death
+dhs_unified <- dhs_unified %>%
+  mutate(
+    unified_id = paste0("DHS_", row_number()),
+    out_perinatal_death = case_when(
+      out_stillbirth_28wks == "Yes" | out_nnd_early == "Yes" ~ "Yes",
+      out_stillbirth_28wks == "No" & (out_nnd_early == "No" | is.na(out_nnd_early)) ~ "No",
+      TRUE ~ NA_character_
+    )
+  )
+
+cat(glue("Combined dataset: {nrow(dhs_unified)} records\n"))
+cat(glue("  Live births: {sum(dhs_unified$out_livebirth == 'Yes', na.rm=TRUE)}\n"))
+cat(glue("  Stillbirths: {sum(dhs_unified$out_stillbirth == 'Yes', na.rm=TRUE)}\n"))
+cat(glue("  Neonatal deaths: {sum(dhs_unified$out_nnd == 'Yes', na.rm=TRUE)}\n\n"))
+
+
+# --- 2. LINK GEOGRAPHIC DATA ---
+cat("--- Linking geographic data ---\n")
+
+ge_files <- list.files(dirs$dhs_geo, pattern = "\\.(shp|dbf)$",
+                       full.names = TRUE, recursive = TRUE)
+ge_shp_files <- ge_files[grepl("\\.shp$", ge_files)]
+
+if (length(ge_shp_files) > 0) {
+  cat(glue("Found {length(ge_shp_files)} GE shapefiles\n"))
+  
+  if (!requireNamespace("sf", quietly = TRUE)) install.packages("sf")
+  
+  all_geo <- list()
+  
+  for (ge_path in ge_shp_files) {
+    tryCatch({
+      geo <- sf::st_read(ge_path, quiet = TRUE)
+      
+      geo_df <- geo %>%
+        sf::st_drop_geometry() %>%
+        select(any_of(c("DHSCLUST", "LATNUM", "LONGNUM", "URBAN_RURA",
+                         "DHSID", "DHSREGCO", "DHSREGNA", "ALT_GPS", "ALT_DEM"))) %>%
+        rename_with(~case_when(
+          . == "DHSCLUST"    ~ "dhs_cluster",
+          . == "LATNUM"      ~ "env_latitude",
+          . == "LONGNUM"     ~ "env_longitude",
+          . == "URBAN_RURA"  ~ "geo_urban_rural",
+          . == "ALT_DEM"     ~ "env_altitude_m",
+          TRUE ~ .
+        )) %>%
+        mutate(
+          ge_source_file = basename(ge_path),
+          ge_country_code = substr(basename(ge_path), 1, 2)
+        )
+      
+      if ("env_latitude" %in% names(geo_df)) {
+        geo_df <- geo_df %>%
+          filter(!is.na(env_latitude) & env_latitude != 0)
+      }
+      
+      all_geo[[length(all_geo) + 1]] <- geo_df
+    }, error = function(e) {
+      cat(glue("  Warning: Could not read {basename(ge_path)}: {e$message}\n"))
+    })
+  }
+  
+  if (length(all_geo) > 0) {
+    geo_combined <- bind_rows(all_geo) %>%
+      distinct(dhs_cluster, ge_country_code, .keep_all = TRUE)
+    
+    dhs_unified <- dhs_unified %>%
+      mutate(.ge_country_code = substr(dhs_survey_id, 1, 2)) %>%
+      left_join(
+        geo_combined,
+        by = c("dhs_cluster" = "dhs_cluster", ".ge_country_code" = "ge_country_code")
+      ) %>%
+      select(-.ge_country_code)
+    
+    n_geo <- sum(!is.na(dhs_unified$env_latitude))
+    cat(glue("Geographic data linked: {n_geo}/{nrow(dhs_unified)} records ({round(n_geo/nrow(dhs_unified)*100,1)}%)\n\n"))
+  } else {
+    cat("No valid geographic data loaded.\n")
+    if (!"env_latitude" %in% names(dhs_unified)) dhs_unified$env_latitude <- NA_real_
+    if (!"env_longitude" %in% names(dhs_unified)) dhs_unified$env_longitude <- NA_real_
+  }
+
+} else {
+  cat("No GE shapefiles found in geographic directory.\n")
+  cat(glue("  Looked in: {dirs$dhs_geo}\n"))
+  cat("  Download GE files and place them in this directory.\n\n")
+  if (!"env_latitude" %in% names(dhs_unified)) dhs_unified$env_latitude <- NA_real_
+  if (!"env_longitude" %in% names(dhs_unified)) dhs_unified$env_longitude <- NA_real_
+}
+
+# --- v7.2 FIX: Also store coordinates as loc_latitude/loc_longitude ---
+# The environmental pipeline (v3.2) reads loc_latitude/loc_longitude, not
+# env_latitude/env_longitude. Copy DHS GPS coordinates to both column names
+# so coordinates are available regardless of which name is used downstream.
+if ("env_latitude" %in% names(dhs_unified)) {
+  dhs_unified$loc_latitude <- dhs_unified$env_latitude
+  dhs_unified$loc_longitude <- dhs_unified$env_longitude
+  n_with_loc <- sum(!is.na(dhs_unified$loc_latitude))
+  cat(glue("v7.2: Copied env_latitude/longitude to loc_latitude/longitude ({n_with_loc} records)\n\n"))
+} else {
+  dhs_unified$loc_latitude <- NA_real_
+  dhs_unified$loc_longitude <- NA_real_
+}
+
+
+# --- 3. SAVE TO DROPBOX (PRIMARY) ---
+cat("--- Saving to Dropbox (primary) ---\n")
+
+if (!dir.exists(dirs$output)) dir.create(dirs$output, recursive = TRUE)
+
+saveRDS(dhs_unified, file.path(dirs$output, "dhs_unified_dataset.rds"))
+cat(glue("  Saved: dhs_unified_dataset.rds\n"))
+
+write_csv(dhs_unified, file.path(dirs$output, "dhs_unified_dataset.csv"))
+cat(glue("  Saved: dhs_unified_dataset.csv\n"))
+
+# Stata (truncate long variable names)
+dhs_stata <- dhs_unified
+long_names <- names(dhs_stata)[nchar(names(dhs_stata)) > 32]
+if (length(long_names) > 0) {
+  cat(glue("  Truncating {length(long_names)} variable names for Stata compatibility\n"))
+  names(dhs_stata)[nchar(names(dhs_stata)) > 32] <- substr(
+    names(dhs_stata)[nchar(names(dhs_stata)) > 32], 1, 32
+  )
+}
+haven::write_dta(dhs_stata, file.path(dirs$output, "dhs_unified_dataset.dta"), version = 14)
+cat(glue("  Saved: dhs_unified_dataset.dta\n"))
+rm(dhs_stata)
+
+# 10% sample (stratified by country, seed for reproducibility)
+set.seed(42)
+dhs_sample <- dhs_unified %>%
+  group_by(mat_country) %>%
+  sample_frac(0.1) %>%
+  ungroup()
+
+saveRDS(dhs_sample, file.path(dirs$output, "dhs_unified_10pct_sample.rds"))
+write_csv(dhs_sample, file.path(dirs$output, "dhs_unified_10pct_sample.csv"))
+cat(glue("  Saved 10% sample: {nrow(dhs_sample)} records\n"))
+
+# Processing log
+write_csv(log_df, file.path(dirs$dhs_logs, "dhs_processing_log.csv"))
+cat(glue("  Saved log: dhs_processing_log.csv\n"))
+
+
+# --- 4. OPTIONAL: COPY TO ONEDRIVE ---
+if (copy_to_onedrive && dir.exists(dirs$output_onedrive)) {
+  cat("\n--- Copying to OneDrive (secondary) ---\n")
+  
+  files_to_copy <- c(
+    "dhs_unified_dataset.rds",
+    "dhs_unified_dataset.csv",
+    "dhs_unified_dataset.dta",
+    "dhs_unified_10pct_sample.rds",
+    "dhs_unified_10pct_sample.csv"
+  )
+  
+  for (f in files_to_copy) {
+    src <- file.path(dirs$output, f)
+    dst <- file.path(dirs$output_onedrive, f)
+    if (file.exists(src)) {
+      file.copy(src, dst, overwrite = TRUE)
+      cat(glue("  Copied: {f}\n"))
+    }
+  }
+  
+  cat(glue("  OneDrive copy complete: {dirs$output_onedrive}\n"))
+} else if (copy_to_onedrive) {
+  cat("\nOneDrive directory not found - skipping copy.\n")
+}
+
+
+# --- 5. FINAL SUMMARY ---
+cat(glue("\n\n{strrep('=', 60)}\n"))
+cat("DHS UNIFIED DATASET - FINAL SUMMARY\n")
+cat(glue("{strrep('=', 60)}\n\n"))
+
+cat(glue("Total records: {nrow(dhs_unified)}\n"))
+cat(glue("  Live births:     {sum(dhs_unified$out_livebirth == 'Yes', na.rm=TRUE)}\n"))
+cat(glue("  Stillbirths:     {sum(dhs_unified$out_stillbirth == 'Yes', na.rm=TRUE)}\n"))
+cat(glue("  Neonatal deaths: {sum(dhs_unified$out_nnd == 'Yes', na.rm=TRUE)}\n"))
+cat(glue("  Countries:       {n_distinct(dhs_unified$mat_country)}\n"))
+cat(glue("  Surveys:         {n_distinct(dhs_unified$dhs_survey_id)}\n"))
+cat(glue("  With GPS coords: {sum(!is.na(dhs_unified$env_latitude))}\n\n"))
+
+cat("Module distribution:\n")
+dhs_unified %>% count(module) %>% print()
+
+cat(glue("\nPrimary output: {dirs$output}\n"))
+if (copy_to_onedrive) cat(glue("OneDrive copy:  {dirs$output_onedrive}\n"))
+
+cat("\n\nPipeline ready for Step 10: Merge with 6-study unified dataset.\n")
+```
+
+
+# Step 10: Merge DHS with 6-Study Unified Dataset
+
+```{r merge-with-6study}
+# ============================================================================
+# STEP 10: MERGE DHS WITH 6-STUDY UNIFIED DATASET
+# ============================================================================
+# Loads the existing 6-study unified dataset (NCOPS, ALERT, PRECISE,
+# PTBi, EN-INDEPTH, WHOMCS) and appends DHS data to create a single
+# merged output file for analysis and environmental pipelines.
+# ============================================================================
+
+MERGED_VERSION <- "10.16"
+```
+
+
+```{r merge-with-6study}
+```
+
+
+```{r merge-with-6study}
+```
+
+
+```{r merge-with-6study}
+# Load DHS unified dataset from saved RDS (if not already in memory)
+if (!exists("dhs_unified")) {
+  dhs_rds_candidates <- c(
+    file.path(gsub("/data$", "", dirs$pipeline), "output", "dhs_unified_dataset.rds"),
+    file.path(dirs$pipeline, "output", "dhs_unified_dataset.rds"),
+    file.path(gsub("/data$", "", dirs$pipeline), "output", "intermediate", "dhs_unified_dataset.rds"),
+    file.path(dirs$output_onedrive, "dhs_unified_dataset.rds")
+  )
+  dhs_rds_path <- NULL
+  for (p in dhs_rds_candidates) {
+    if (file.exists(p)) { dhs_rds_path <- p; break }
+  }
+  if (is.null(dhs_rds_path)) stop("Cannot find dhs_unified_dataset.rds - re-run Steps 1-9 first")
+  cat(glue("Loading DHS dataset from: {dhs_rds_path}\n\n"))
+  dhs_unified <- readRDS(dhs_rds_path)
+}
+
+cat(strrep("=", 60), "\n")
+cat("STEP 10: MERGE DHS WITH 6-STUDY UNIFIED DATASET\n")
+cat(strrep("=", 60), "\n\n")
+
+# --- 1. LOCATE THE 6-STUDY UNIFIED DATASET ---
+base_pipeline <- gsub("/data$", "", dirs$pipeline)
+
+versions_to_try <- c(MERGED_VERSION, "10.15", "10.14", "10.13", "10.12",
+                     "10.11", "10.10", "10.9", "10.8")
+versions_to_try <- unique(versions_to_try)
+
+six_study_candidates <- c(
+  file.path(base_pipeline, "output", paste0("unified_dataset_v", versions_to_try, ".rds")),
+  file.path(dirs$pipeline, "output", paste0("unified_dataset_v", versions_to_try, ".rds")),
+  file.path(base_pipeline, "output", "intermediate", "phase3_unified.rds"),
+  file.path(dirs$pipeline, "intermediate", "phase3_unified.rds"),
+  file.path(dirs$output_onedrive, paste0("unified_dataset_v", versions_to_try[1:3], ".rds"))
+)
+
+cat("Searching for 6-study unified dataset...\n")
+cat(glue("  base_pipeline:     {base_pipeline}\n"))
+cat(glue("  dirs$pipeline:     {dirs$pipeline}\n"))
+cat(glue("  dirs$output_onedrive: {dirs$output_onedrive}\n\n"))
+
+six_study_path <- NULL
+for (p in six_study_candidates) {
+  if (file.exists(p)) { six_study_path <- p; break }
+}
+
+# Recursive fallback
+if (is.null(six_study_path)) {
+  cat("Standard paths failed. Trying recursive search...\n")
+  recursive_hits <- list.files(
+    path = base_pipeline,
+    pattern = "^unified_dataset_v10.*\\.rds$",
+    recursive = TRUE, full.names = TRUE
+  )
+  if (length(recursive_hits) > 0) {
+    six_study_path <- sort(recursive_hits, decreasing = TRUE)[1]
+    cat(glue("  Found via recursive search: {six_study_path}\n"))
+  }
+}
+
+if (is.null(six_study_path)) {
+  cat("WARNING: No 6-study unified dataset found!\n")
+  cat("Searched locations:\n")
+  for (p in unique(six_study_candidates[1:6])) cat(glue("  {p}\n"))
+  cat("\nSkipping merge - DHS standalone outputs are still available.\n")
+  
+} else {
+  
+  cat(glue("Found 6-study dataset: {basename(six_study_path)}\n"))
+  cat(glue("  Path: {six_study_path}\n"))
+  cat(glue("  Size: {round(file.info(six_study_path)$size / 1024^2, 1)} MB\n\n"))
+  
+  six_study <- readRDS(six_study_path)
+  cat(glue("Loaded 6-study dataset: {nrow(six_study)} records, {ncol(six_study)} variables\n"))
+  cat(glue("  Studies: {paste(unique(six_study$study_source), collapse = ', ')}\n\n"))
+  
+  # --- 2. REMOVE ANY EXISTING DHS ROWS (re-merge protection) ---
+  if ("DHS" %in% unique(six_study$study_source)) {
+    n_before <- nrow(six_study)
+    six_study <- six_study %>% filter(study_source != "DHS")
+    cat(glue("Removed {n_before - nrow(six_study)} existing DHS rows\n"))
+    cat(glue("  Remaining: {nrow(six_study)} records\n\n"))
+  }
+  
+  # --- 3. ALIGN COLUMNS ---
+  cols_6study_only <- setdiff(names(six_study), names(dhs_unified))
+  cols_dhs_only    <- setdiff(names(dhs_unified), names(six_study))
+  
+  cat(glue("Column alignment:\n"))
+  cat(glue("  6-study variables: {ncol(six_study)}\n"))
+  cat(glue("  DHS variables:     {ncol(dhs_unified)}\n"))
+  cat(glue("  Shared:            {length(intersect(names(six_study), names(dhs_unified)))}\n"))
+  cat(glue("  In 6-study only:   {length(cols_6study_only)}\n"))
+  cat(glue("  In DHS only:       {length(cols_dhs_only)}\n\n"))
+  
+  for (col in cols_6study_only) dhs_unified[[col]] <- NA
+  for (col in cols_dhs_only)    six_study[[col]]    <- NA
+  
+  all_cols <- union(names(six_study), names(dhs_unified))
+  six_study   <- six_study[, all_cols]
+  dhs_unified <- dhs_unified[, all_cols]
+  
+  # --- 4. TYPE ALIGNMENT (vectorised - fast) ---
+  cat("Aligning column types...\n")
+  common_types <- sapply(all_cols, function(col) {
+    t6 <- class(six_study[[col]])[1]
+    td <- class(dhs_unified[[col]])[1]
+    if (t6 == td) return("match")
+    if (t6 == "character" || td == "character") return("character")
+    if (t6 %in% c("numeric", "integer") && td %in% c("numeric", "integer")) return("numeric")
+    return("character")
+  })
+  
+  cols_to_char <- names(common_types[common_types == "character"])
+  cols_to_num  <- names(common_types[common_types == "numeric"])
+  
+  if (length(cols_to_char) > 0) {
+    six_study   <- six_study   %>% mutate(across(all_of(cols_to_char), as.character))
+    dhs_unified <- dhs_unified %>% mutate(across(all_of(cols_to_char), as.character))
+  }
+  if (length(cols_to_num) > 0) {
+    six_study   <- six_study   %>% mutate(across(all_of(cols_to_num), as.numeric))
+    dhs_unified <- dhs_unified %>% mutate(across(all_of(cols_to_num), as.numeric))
+  }
+  cat(glue("  Coerced {length(cols_to_char)} cols to character, {length(cols_to_num)} to numeric\n\n"))
+  
+  # --- 5. MERGE ---
+  cat("Merging datasets...\n")
+  merged <- bind_rows(six_study, dhs_unified)
+  merged$unified_id <- paste0(merged$study_source, "_", seq_len(nrow(merged)))
+  
+  cat(glue("\nMERGED DATASET CREATED\n"))
+  cat(glue("  Total records:     {nrow(merged)}\n"))
+  cat(glue("  Total variables:   {ncol(merged)}\n"))
+  cat(glue("  Studies:           {paste(unique(merged$study_source), collapse = ', ')}\n\n"))
+  
+  cat("Records by study:\n")
+  merged %>% count(study_source, name = "n_records") %>% print()
+  cat(glue("\nCountries: {n_distinct(merged$mat_country, na.rm = TRUE)}\n"))
+  
+  # --- 6. SAVE MERGED OUTPUT ---
+  merged_output_dir <- dirname(six_study_path)
+  if (!dir.exists(merged_output_dir)) dir.create(merged_output_dir, recursive = TRUE)
+  cat(glue("\nSaving outputs to: {merged_output_dir}\n"))
+  
+  # RDS
+  merged_rds <- file.path(merged_output_dir, paste0("merged_unified_dataset_v", MERGED_VERSION, ".rds"))
+  saveRDS(merged, merged_rds)
+  cat(glue("  Saved: {basename(merged_rds)} ({round(file.info(merged_rds)$size / 1024^2, 1)} MB)\n"))
+  
+  # CSV
+  merged_csv <- file.path(merged_output_dir, paste0("merged_unified_dataset_v", MERGED_VERSION, ".csv"))
+  write_csv(merged, merged_csv)
+  cat(glue("  Saved: {basename(merged_csv)}\n"))
+  
+  # Stata (.dta)
+  merged_stata <- merged
+  long_names <- names(merged_stata)[nchar(names(merged_stata)) > 32]
+  if (length(long_names) > 0) {
+    cat(glue("  Truncating {length(long_names)} variable names for Stata\n"))
+    names(merged_stata)[nchar(names(merged_stata)) > 32] <- substr(
+      names(merged_stata)[nchar(names(merged_stata)) > 32], 1, 32
+    )
+    names(merged_stata) <- make.unique(names(merged_stata), sep = "_")
+  }
+  merged_dta <- file.path(merged_output_dir, paste0("merged_unified_dataset_v", MERGED_VERSION, ".dta"))
+  haven::write_dta(merged_stata, merged_dta, version = 14)
+  cat(glue("  Saved: {basename(merged_dta)}\n"))
+  rm(merged_stata)
+  
+  # Excel - skip for large datasets
+  if (nrow(merged) > 1000000) {
+    cat("  Excel save skipped (>1M rows - use RDS/CSV instead)\n")
+  } else {
+    merged_xlsx <- file.path(merged_output_dir, paste0("merged_unified_dataset_v", MERGED_VERSION, ".xlsx"))
+    tryCatch({
+      openxlsx::write.xlsx(merged, merged_xlsx)
+      cat(glue("  Saved: {basename(merged_xlsx)}\n"))
+    }, error = function(e) {
+      cat(glue("  Excel save skipped: {e$message}\n"))
+    })
+  }
+  
+  # 10% stratified sample
+  set.seed(42)
+  merged_sample <- merged %>%
+    group_by(study_source) %>%
+    sample_frac(0.1) %>%
+    ungroup()
+  
+  merged_sample_rds <- file.path(merged_output_dir, paste0("merged_unified_10pct_sample_v", MERGED_VERSION, ".rds"))
+  saveRDS(merged_sample, merged_sample_rds)
+  merged_sample_csv <- file.path(merged_output_dir, paste0("merged_unified_10pct_sample_v", MERGED_VERSION, ".csv"))
+  write_csv(merged_sample, merged_sample_csv)
+  cat(glue("  Saved 10% sample: {nrow(merged_sample)} records\n"))
+  
+  # --- 7. OPTIONAL: COPY TO ONEDRIVE ---
+  if (copy_to_onedrive && dir.exists(dirs$output_onedrive)) {
+    cat("\n--- Copying merged files to OneDrive ---\n")
+    merge_files <- c(
+      paste0("merged_unified_dataset_v", MERGED_VERSION, ".rds"),
+      paste0("merged_unified_dataset_v", MERGED_VERSION, ".csv"),
+      paste0("merged_unified_dataset_v", MERGED_VERSION, ".dta"),
+      paste0("merged_unified_10pct_sample_v", MERGED_VERSION, ".rds"),
+      paste0("merged_unified_10pct_sample_v", MERGED_VERSION, ".csv")
+    )
+    for (f in merge_files) {
+      src <- file.path(merged_output_dir, f)
+      dst <- file.path(dirs$output_onedrive, f)
+      if (file.exists(src)) {
+        file.copy(src, dst, overwrite = TRUE)
+        cat(glue("  Copied: {f}\n"))
+      }
+    }
+  }
+  
+  # --- 8. FINAL SUMMARY ---
+  cat(glue("\n\n{strrep('=', 60)}\n"))
+  cat("MERGED UNIFIED DATASET - FINAL SUMMARY\n")
+  cat(glue("{strrep('=', 60)}\n\n"))
+  
+  cat(glue("Version:             {MERGED_VERSION}\n"))
+  cat(glue("Total records:       {nrow(merged)}\n"))
+  cat(glue("Total variables:     {ncol(merged)}\n"))
+  cat(glue("Studies:             {n_distinct(merged$study_source)}\n"))
+  cat(glue("Countries:           {n_distinct(merged$mat_country, na.rm = TRUE)}\n\n"))
+  
+  cat("Outcome summary:\n")
+  cat(glue("  Live births:       {sum(merged$out_livebirth == 'Yes', na.rm = TRUE)}\n"))
+  cat(glue("  Stillbirths:       {sum(merged$out_stillbirth == 'Yes', na.rm = TRUE)}\n"))
+  cat(glue("  Neonatal deaths:   {sum(merged$out_nnd == 'Yes', na.rm = TRUE)}\n"))
+  cat(glue("  With GPS coords:   {sum(!is.na(merged$env_latitude) | !is.na(merged$loc_latitude), na.rm = TRUE)}\n\n"))
+  
+  cat(glue("Output directory: {merged_output_dir}\n"))
+  cat(glue("Merged file:      merged_unified_dataset_v{MERGED_VERSION}.rds\n\n"))
+  
+  cat("Next steps:\n")
+  cat(glue("1. Run analysis pipeline on merged_unified_dataset_v{MERGED_VERSION}.rds\n"))
+  cat("2. Run environmental pipeline to add PM2.5, ERA5, CHIRPS variables\n")
+  cat("3. Run SGA calculation using gigs R package\n")
+  
+  rm(six_study, merged_sample)
+  gc(verbose = FALSE)
+}
+```
+
+
+# Utility: Bootstrap Checkpoints from Existing Output
+
+```{r bootstrap-checkpoints, eval=FALSE}
+# ============================================================================
+# BOOTSTRAP: Create checkpoint files from existing compiled output
+# ============================================================================
+# Run ONCE if you already have a compiled dhs_unified_dataset.rds from a
+# previous run (before checkpointing was added). Creates the checkpoint files
+# so Step 7 skips reprocessing.
+# ============================================================================
+
+cat("=== BOOTSTRAPPING CHECKPOINTS FROM EXISTING OUTPUT ===\n\n")
+
+candidate_paths <- c(
+  file.path(dirs$output_onedrive, "dhs_unified_dataset.rds"),
+  file.path(dirs$output, "dhs_unified_dataset.rds")
+)
+
+existing_rds <- NULL
+for (p in candidate_paths) {
+  if (file.exists(p)) { existing_rds <- p; break }
+}
+
+if (is.null(existing_rds)) {
+  stop("No existing dhs_unified_dataset.rds found. Run the full pipeline first.")
+}
+
+cat(glue("Found: {existing_rds}\n"))
+existing_data <- readRDS(existing_rds)
+cat(glue("Loaded: {nrow(existing_data)} records\n\n"))
+
+livebirths_df <- existing_data %>%
+  filter(out_livebirth == "Yes" | (out_stillbirth != "Yes" & is.na(out_stillbirth)))
+stillbirths_df <- existing_data %>%
+  filter(out_stillbirth == "Yes")
+
+if ("dhs_survey_id" %in% names(existing_data)) {
+  all_br_processed <- split(livebirths_df, livebirths_df$dhs_survey_id)
+  all_stillbirths  <- split(stillbirths_df, stillbirths_df$dhs_survey_id)
+  
+  processing_log <- lapply(unique(existing_data$dhs_survey_id), function(sid) {
+    survey_data <- existing_data %>% filter(dhs_survey_id == sid)
+    list(
+      survey_id = sid,
+      country = if ("mat_country" %in% names(survey_data)) survey_data$mat_country[1] else NA,
+      year = if ("studyyear" %in% names(survey_data)) survey_data$studyyear[1] else NA,
+      status = "success",
+      module = if ("module" %in% names(survey_data)) survey_data$module[1] else NA,
+      sb_method = "bootstrapped",
+      n_births = sum(survey_data$out_livebirth == "Yes", na.rm = TRUE),
+      n_stillbirths = sum(survey_data$out_stillbirth == "Yes", na.rm = TRUE)
+    )
+  })
+  names(processing_log) <- unique(existing_data$dhs_survey_id)
+} else {
+  all_br_processed <- list(all = livebirths_df)
+  all_stillbirths  <- list(all = stillbirths_df)
+  processing_log   <- list(all = list(survey_id = "all", status = "success"))
+}
+
+if (!dir.exists(dirs$dhs_checkpts)) dir.create(dirs$dhs_checkpts, recursive = TRUE)
+
+saveRDS(all_br_processed, file.path(dirs$dhs_checkpts, "all_br_processed.rds"))
+saveRDS(all_stillbirths,  file.path(dirs$dhs_checkpts, "all_stillbirths.rds"))
+saveRDS(processing_log,   file.path(dirs$dhs_checkpts, "processing_log.rds"))
+
+cat(glue("\nSurveys in checkpoint: {length(all_br_processed)}\n"))
+cat(glue("Total live births:    {sum(sapply(all_br_processed, nrow))}\n"))
+cat(glue("Total stillbirths:    {sum(sapply(all_stillbirths, nrow))}\n"))
+cat("\n=== BOOTSTRAP COMPLETE ===\n")
+
+rm(existing_data, livebirths_df, stillbirths_df)
+gc(verbose = FALSE)
+```
+
+
+# Utility: Clear Checkpoints (Force Reprocessing)
+
+```{r clear-checkpoints, eval=FALSE}
+# ============================================================================
+# CLEAR CHECKPOINTS — forces Step 7 to reprocess ALL surveys
+# ============================================================================
+# Only run this if you want to reprocess everything from scratch.
+# After clearing, re-run the pipeline — Step 7 will take 6-10 hours.
+# ============================================================================
+
+checkpoint_files <- list.files(dirs$dhs_checkpts, full.names = TRUE)
+if (length(checkpoint_files) > 0) {
+  cat(glue("Deleting {length(checkpoint_files)} checkpoint files...\n"))
+  file.remove(checkpoint_files)
+  cat("Checkpoints cleared. Step 7 will reprocess on next run.\n")
+} else {
+  cat("No checkpoint files found.\n")
+}
+```

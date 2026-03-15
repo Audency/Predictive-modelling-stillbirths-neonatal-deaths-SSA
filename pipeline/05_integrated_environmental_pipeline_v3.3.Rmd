@@ -1,0 +1,1122 @@
+---
+title: "Integrated Environmental Data Pipeline v3.3"
+author: "Joseph Akuze (LSHTM)"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    number_sections: true
+    df_print: paged
+    code_folding: show
+version: '3.3'
+subtitle: "Complete Environmental Data Extraction for Stillbirth and Neonatal Death Prediction"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.width = 10, fig.height = 6
+)
+
+# ============================================================================
+# REQUIRED PACKAGES
+# ============================================================================
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(terra)
+  library(sf)
+  library(lubridate)
+  library(ncdf4)
+  library(haven)
+  library(tools)
+  library(knitr)
+  library(janitor)
+})
+
+# Try to load elevatr (for SRTM download) - optional
+has_elevatr <- require(elevatr, quietly = TRUE)
+
+VERSION <- "3.3"
+```
+
+# Overview
+
+This integrated pipeline performs **complete environmental data processing** in a single workflow:
+
+**Part A: Environmental Linkage Creation (from v2.0)**
+
+1. Load unified dataset
+2. Create facility and country geocode references
+3. Extract geographic-temporal data
+4. Geocoding and coordinate enhancement
+5. Calculate temporal windows (trimesters, periconception)
+6. Create environmental variable placeholders
+
+**Part B: Environmental Data Extraction**
+
+7. Extract elevation and slope (SRTM)
+8. Extract ERA5 climate data (temperature, humidity, precipitation, heat index)
+9. Extract PM2.5 air quality (ACAG)
+10. Classify seasons
+11. Quality summary and validation
+12. Export final dataset
+
+---
+
+# Phase 0: Configuration
+
+```{r phase0-config}
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║         INTEGRATED ENVIRONMENTAL PIPELINE v", VERSION, "                       ║\n", sep = "")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Input: Your unified dataset (merged = 6-study + DHS; fallback to 6-study only)
+# v3.3: Updated to read v10.16 (produced by DHS Pipeline v7.2)
+FILE_UNIFIED <- "output/merged_unified_dataset_v10.16.rds"
+FILE_UNIFIED_DTA <- "output/merged_unified_dataset_v10.16.dta"
+FILE_UNIFIED_CSV <- "output/merged_unified_dataset_v10.16.csv"
+
+# Optional: Raw PRECISE data for GPS coordinates
+FILE_PRECISE_RAW <- "data/PRECISE_dataset.dta"
+
+# Climate data directories
+DIR_ERA5 <- "data/era5"
+DIR_SRTM <- "data/srtm"
+DIR_PM25 <- "data/pm25"
+DIR_NDVI <- "data/ndvi"
+
+# ERA5 file paths (specific files)
+FILE_ERA5_TEMP <- "data/era5/data_stream-moda_stepType-avgua.nc"  # t2m, d2m
+FILE_ERA5_PRECIP <- "data/era5/era5_monthly_africa.nc"            # tp
+
+# Output directory and file name
+DIR_OUTPUT <- "output/environmental"
+OUTPUT_FILE <- "environmental_linkage_v3.3"
+
+# Create directories
+dir.create(DIR_OUTPUT, recursive = TRUE, showWarnings = FALSE)
+dir.create(DIR_SRTM, recursive = TRUE, showWarnings = FALSE)
+
+cat("Configuration:\n")
+cat(sprintf("  Unified dataset: %s\n", FILE_UNIFIED))
+cat(sprintf("  ERA5 temp file:  %s\n", FILE_ERA5_TEMP))
+cat(sprintf("  ERA5 precip file: %s\n", FILE_ERA5_PRECIP))
+cat(sprintf("  PM2.5 directory: %s\n", DIR_PM25))
+cat(sprintf("  Output:          %s/%s.*\n", DIR_OUTPUT, OUTPUT_FILE))
+```
+
+## 0.1 Utility Functions
+
+```{r phase0-utilities}
+# ============================================================================
+# DATA LOADING FUNCTION
+# ============================================================================
+safe_load_data <- function(filepath, encoding = "UTF-8") {
+  if (!file.exists(filepath)) {
+    warning(sprintf("File not found: %s", filepath))
+    return(NULL)
+  }
+  
+  ext <- tolower(tools::file_ext(filepath))
+  
+  tryCatch({
+    df <- switch(ext,
+      "csv" = readr::read_csv(filepath, show_col_types = FALSE),
+      "dta" = haven::read_dta(filepath),
+      "rds" = readRDS(filepath),
+      readr::read_csv(filepath, show_col_types = FALSE)
+    )
+    message(sprintf("✓ Loaded %s: %d rows x %d cols", basename(filepath), nrow(df), ncol(df)))
+    return(df)
+  }, error = function(e) {
+    warning(sprintf("✗ Failed to load %s: %s", filepath, e$message))
+    return(NULL)
+  })
+}
+
+# ============================================================================
+# SAFE COLUMN ACCESS
+# ============================================================================
+get_col_chr <- function(df, col_name) {
+  if (col_name %in% names(df)) return(as.character(df[[col_name]]))
+  return(rep(NA_character_, nrow(df)))
+}
+
+get_col_num <- function(df, col_name) {
+  if (col_name %in% names(df)) return(suppressWarnings(as.numeric(df[[col_name]])))
+  return(rep(NA_real_, nrow(df)))
+}
+
+get_col_date <- function(df, col_name) {
+  if (col_name %in% names(df)) {
+    val <- df[[col_name]]
+    if (inherits(val, "Date")) return(val)
+    if (inherits(val, "POSIXct")) return(as.Date(val))
+    return(suppressWarnings(as.Date(val)))
+  }
+  return(rep(as.Date(NA), nrow(df)))
+}
+
+# ============================================================================
+# ERA5 EXTRACTION FUNCTION (from working script)
+# ============================================================================
+extract_era5_variable <- function(nc_file, var_name, coords_df) {
+  
+  nc <- nc_open(nc_file)
+  
+  lon <- ncvar_get(nc, "longitude")
+  lat <- ncvar_get(nc, "latitude")
+  var_data <- ncvar_get(nc, var_name)
+  
+  nc_close(nc)
+  
+  result <- rep(NA_real_, nrow(coords_df))
+  
+  for (i in 1:nrow(coords_df)) {
+    target_lon <- coords_df$env_longitude[i]
+    target_lat <- coords_df$env_latitude[i]
+    
+    lon_idx <- which.min(abs(lon - target_lon))
+    lat_idx <- which.min(abs(lat - target_lat))
+    
+    # var_data is [lon, lat, time] - get mean across all times
+    if (length(dim(var_data)) == 3) {
+      vals <- var_data[lon_idx, lat_idx, ]
+    } else {
+      vals <- var_data[lon_idx, lat_idx]
+    }
+    
+    result[i] <- mean(vals, na.rm = TRUE)
+  }
+  
+  return(result)
+}
+```
+
+---
+
+# Part A: Environmental Linkage Creation
+
+# Phase 1: Load Unified Dataset
+
+```{r phase1-load}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                 PHASE 1: LOADING UNIFIED DATASET                           ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+unified_dataset <- NULL
+
+if (file.exists(FILE_UNIFIED)) {
+  unified_dataset <- safe_load_data(FILE_UNIFIED)
+} else if (file.exists(FILE_UNIFIED_DTA)) {
+  unified_dataset <- safe_load_data(FILE_UNIFIED_DTA)
+} else if (file.exists(FILE_UNIFIED_CSV)) {
+  unified_dataset <- safe_load_data(FILE_UNIFIED_CSV)
+} else {
+  # Fallback: try other versions (most recent first)
+  fallback_paths <- c(
+    "output/merged_unified_dataset_v10.16.rds",
+    "output/unified_dataset_v10.16.rds",
+    "output/merged_unified_dataset_v10.15.rds",
+    "output/unified_dataset_v10.15.rds",
+    "output/merged_unified_dataset_v10.14.rds",
+    "output/unified_dataset_v10.14.rds",
+    "output/merged_unified_dataset_v10.13.rds",
+    "output/unified_dataset_v10.13.rds",
+    "output/unified_dataset_v10.12.rds",
+    "output/unified_dataset_v10.11.rds"
+  )
+  for (fp in fallback_paths) {
+    if (file.exists(fp)) {
+      cat(sprintf("  Using fallback: %s\n", fp))
+      unified_dataset <- safe_load_data(fp)
+      break
+    }
+  }
+}
+
+if (is.null(unified_dataset)) {
+  stop("✗ FATAL: Could not load unified dataset!")
+}
+
+cat("\n=== UNIFIED DATASET SUMMARY ===\n")
+cat(sprintf("Total records:   %s\n", format(nrow(unified_dataset), big.mark = ",")))
+cat(sprintf("Total variables: %d\n", ncol(unified_dataset)))
+cat(sprintf("Studies: %s\n", paste(unique(unified_dataset$study_source), collapse = ", ")))
+
+study_summary <- unified_dataset %>%
+  group_by(study_source) %>%
+  summarise(n = n(), .groups = "drop")
+print(kable(study_summary, caption = "Records by Study"))
+```
+
+# Phase 2: Geographic Reference Data
+
+```{r phase2-geocodes}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                 PHASE 2: GEOGRAPHIC REFERENCE DATA                         ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Facility geocodes
+facility_geocodes <- tribble(
+  ~study_source, ~facility_clean, ~latitude, ~longitude, ~accuracy_level,
+  "NCOPS", "mulago national referral hospital", 0.3370, 32.5766, "facility",
+  "NCOPS", "kawempe national referral hospital", 0.3645, 32.5506, "facility",
+  "NCOPS", "nsambya hospital", 0.3026, 32.5848, "facility",
+  "NCOPS", "jinja regional referral hospital", 0.4244, 33.2041, "facility",
+  "NCOPS", "mbale regional referral hospital", 1.0806, 34.1750, "facility",
+  "NCOPS", "mbarara regional referral hospital", -0.6127, 30.6464, "facility",
+  "NCOPS", "gulu regional referral hospital", 2.7691, 32.2989, "facility",
+  "NCOPS", "hoima regional referral hospital", 1.4334, 31.3523, "facility",
+  "NCOPS", "soroti regional referral hospital", 1.7111, 33.6097, "facility",
+  "NCOPS", "lira regional referral hospital", 2.2494, 32.5434, "facility",
+  "NCOPS", "fort portal regional referral hospital", 0.6710, 30.2750, "facility",
+  "NCOPS", "arua regional referral hospital", 3.0293, 30.9067, "facility",
+  "NCOPS", "kabale regional referral hospital", -1.2503, 29.9881, "facility",
+  "NCOPS", "moroto regional referral hospital", 2.5288, 34.6613, "facility",
+  "PTBi", "mulago national referral hospital", 0.3370, 32.5766, "facility",
+  "PTBi", "kawempe national referral hospital", 0.3645, 32.5506, "facility",
+  "PTBi", "jinja regional referral hospital", 0.4244, 33.2041, "facility",
+  "PTBi", "masaka regional referral hospital", -0.3372, 31.7136, "facility",
+  "ALERT", "jinja regional hospital", 0.4244, 33.2041, "facility",
+  "ALERT", "1. jinja regional hospital", 0.4244, 33.2041, "facility",
+  "ALERT", "ndanda hospital", -10.6500, 39.6167, "facility",
+  "ALERT", "3.1 ndanda", -10.6500, 39.6167, "facility",
+  "ALERT", "kamuzu central hospital", -13.9833, 33.7833, "facility",
+  "PRECISE", "farafenni", 13.5667, -15.6000, "district",
+  "PRECISE", "mariakani", -3.8591, 39.4783, "facility",
+  "PRECISE", "rabai", -3.9333, 39.5500, "facility",
+  "PRECISE", "manhica", -25.4033, 32.8072, "district",
+  "PRECISE", "xinavane", -25.0500, 32.8000, "facility",
+  "EN-INDEPTH", "matlab", 23.3500, 90.7333, "district",
+  "EN-INDEPTH", "bandim", 11.8500, -15.6000, "district",
+  "EN-INDEPTH", "dabat", 13.0333, 37.7500, "district",
+  "EN-INDEPTH", "kintampo", 8.0500, -1.7333, "district",
+  "EN-INDEPTH", "navrongo", 10.8833, -1.0833, "district",
+  "EN-INDEPTH", "iganga/mayuge", 0.6500, 33.5000, "district",
+  "EN-INDEPTH", "iganga", 0.6500, 33.5000, "district"
+)
+
+# Country centroids
+# v3.3: Added all 42 SSA DHS countries that were previously missing
+# (v3.2 had only 30 entries, missing ~29 SSA countries used in DHS pipeline)
+country_centroids <- tribble(
+  ~country_clean, ~latitude, ~longitude,
+  # --- SSA countries (DHS pipeline) ---
+  "uganda", 1.3733, 32.2903,
+  "kenya", -0.0236, 37.9062,
+  "tanzania", -6.3690, 34.8888,
+  "malawi", -13.2543, 34.3015,
+  "mozambique", -18.6657, 35.5296,
+  "the gambia", 13.4432, -15.3101,
+  "gambia", 13.4432, -15.3101,
+  "ghana", 7.9465, -1.0232,
+  "ethiopia", 9.1450, 40.4897,
+  "guinea-bissau", 11.8037, -15.1804,
+  "angola", -11.2027, 17.8739,
+  "niger", 17.6078, 8.0817,
+  "nigeria", 9.0820, 7.4898,
+  "democratic republic of the congo", -4.0383, 21.7587,
+  # v3.3 additions - SSA countries missing from v3.2:
+  "benin", 9.3077, 2.3158,
+  "burkina faso", 12.2383, -1.5616,
+  "burundi", -3.3731, 29.9189,
+  "cameroon", 7.3697, 12.3547,
+  "cape verde", 16.5388, -23.0418,
+  "central african republic", 6.6111, 20.9394,
+  "chad", 15.4542, 18.7322,
+  "comoros", -11.6455, 43.3333,
+  "congo", -0.2280, 15.8277,
+  "congo (brazzaville)", -0.2280, 15.8277,
+  "cote d'ivoire", 7.5400, -5.5471,
+  "ivory coast", 7.5400, -5.5471,
+  "eritrea", 15.1794, 39.7823,
+  "eswatini", -26.5225, 31.4659,
+  "swaziland", -26.5225, 31.4659,
+  "gabon", -0.8037, 11.6094,
+  "guinea", 9.9456, -9.6966,
+  "lesotho", -29.6100, 28.2336,
+  "liberia", 6.4281, -9.4295,
+  "madagascar", -18.7669, 46.8691,
+  "mali", 17.5707, -3.9962,
+  "mauritania", 21.0079, -10.9408,
+  "namibia", -22.9576, 18.4904,
+  "rwanda", -1.9403, 29.8739,
+  "sao tome and principe", 0.1864, 6.6131,
+  "senegal", 14.4974, -14.4524,
+  "sierra leone", 8.4606, -11.7799,
+  "south africa", -30.5595, 22.9375,
+  "sudan", 12.8628, 30.2176,
+  "togo", 8.6195, 0.8248,
+  "zambia", -13.1339, 27.8493,
+  "zimbabwe", -19.0154, 29.1549,
+  # --- Name variations (actual names found in dataset that differ from above) ---
+  # Confirmed from environmental availability diagnostic (background task bae6942):
+  "congo democratic republic", -4.0383, 21.7587,
+  "dem rep of the congo", -4.0383, 21.7587,
+  "viet nam", 14.0583, 108.2772,
+  # --- Non-SSA countries (WHOMCS and other studies) ---
+  "afghanistan", 33.9391, 67.7100,
+  "argentina", -38.4161, -63.6167,
+  "bangladesh", 23.6850, 90.3563,
+  "brazil", -14.2350, -51.9253,
+  "cambodia", 12.5657, 104.9910,
+  "china", 35.8617, 104.1954,
+  "ecuador", -1.8312, -78.1834,
+  "india", 20.5937, 78.9629,
+  "japan", 36.2048, 138.2529,
+  "jordan", 30.5852, 36.2384,
+  "mexico", 23.6345, -102.5528,
+  "nepal", 28.3949, 84.1240,
+  "nicaragua", 12.8654, -85.2072,
+  "pakistan", 30.3753, 69.3451,
+  "peru", -9.1900, -75.0152,
+  "philippines", 12.8797, 121.7740,
+  "thailand", 15.8700, 100.9925,
+  "vietnam", 14.0583, 108.2772,
+  # v3.3 additions - non-SSA WHOMCS countries missing from v3.2:
+  "lebanon", 33.8547, 35.8623,
+  "mongolia", 46.8625, 103.8467,
+  "occupied palestinian territory", 31.9522, 35.2332,
+  "palestine", 31.9522, 35.2332,
+  "paraguay", -23.4425, -58.4438,
+  "qatar", 25.3548, 51.1839,
+  "sri lanka", 7.8731, 80.7718
+)
+
+cat(sprintf("✓ Loaded %d facility geocodes\n", nrow(facility_geocodes)))
+cat(sprintf("✓ Loaded %d country centroids\n", nrow(country_centroids)))
+```
+
+## 2.1 Load PRECISE GPS Coordinates
+
+```{r phase2-precise}
+precise_coords <- NULL
+
+if (file.exists(FILE_PRECISE_RAW)) {
+  raw_precise <- safe_load_data(FILE_PRECISE_RAW)
+  
+  if (!is.null(raw_precise)) {
+    id_col <- if ("f2a_participant_id" %in% names(raw_precise)) "f2a_participant_id" else 
+              if ("f2a_precise_id" %in% names(raw_precise)) "f2a_precise_id" else NULL
+    
+    if (!is.null(id_col)) {
+      precise_coords <- raw_precise %>%
+        select(raw_id = all_of(id_col),
+               any_of(c("villagelat", "villagelong"))) %>%
+        rename_with(~case_when(
+          . == "villagelat" ~ "gps_latitude",
+          . == "villagelong" ~ "gps_longitude",
+          TRUE ~ .
+        )) %>%
+        filter(!is.na(gps_latitude) & !is.na(gps_longitude)) %>%
+        mutate(raw_id = as.character(raw_id),
+               gps_latitude = as.numeric(gps_latitude),
+               gps_longitude = as.numeric(gps_longitude)) %>%
+        filter(gps_latitude >= -90 & gps_latitude <= 90) %>%
+        group_by(raw_id) %>%
+        slice_head(n = 1) %>%
+        ungroup()
+      
+      cat(sprintf("✓ Extracted %d GPS coordinates from PRECISE\n", nrow(precise_coords)))
+    }
+  }
+} else {
+  cat("ℹ PRECISE raw file not found - using facility geocodes only\n")
+}
+```
+
+# Phase 3: Extract Geographic-Temporal Data
+
+```{r phase3-extract}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║           PHASE 3: EXTRACT GEOGRAPHIC-TEMPORAL DATA                        ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+environmental_linkage <- unified_dataset %>%
+  transmute(
+    unified_id = unified_id,
+    study_source = study_source,
+    raw_id = raw_id,
+    geo_country = get_col_chr(., "mat_country"),
+    geo_facility = get_col_chr(., "mat_facility"),
+    geo_district = get_col_chr(., "mat_district"),
+    # v3.3 FIX: Also check env_latitude/env_longitude (used by DHS pipeline)
+    # Previously only read loc_latitude/loc_longitude, which missed DHS GPS data
+    geo_latitude = dplyr::coalesce(get_col_num(., "loc_latitude"), get_col_num(., "env_latitude")),
+    geo_longitude = dplyr::coalesce(get_col_num(., "loc_longitude"), get_col_num(., "env_longitude")),
+    geo_urban_rural = get_col_chr(., "mat_urban_rural"),
+    date_delivery = get_col_date(., "out_dob"),
+    date_death = get_col_date(., "out_dod"),
+    conception_date_unified = get_col_date(., "conception_date"),
+    ga_weeks = get_col_num(., "out_ga_weeks"),
+    studyyear = get_col_num(., "studyyear"),
+    out_stillbirth = get_col_chr(., "out_stillbirth"),
+    out_nnd = get_col_chr(., "out_nnd")
+  )
+
+cat(sprintf("✓ Extracted %d records\n", nrow(environmental_linkage)))
+```
+
+# Phase 4: Geocoding and Coordinate Enhancement
+
+```{r phase4-geocode}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║              PHASE 4: GEOCODING AND COORDINATE ENHANCEMENT                 ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Merge PRECISE GPS if available
+if (!is.null(precise_coords) && nrow(precise_coords) > 0) {
+  environmental_linkage <- environmental_linkage %>%
+    mutate(raw_id = as.character(raw_id)) %>%
+    left_join(precise_coords, by = "raw_id") %>%
+    mutate(
+      geo_latitude = case_when(
+        study_source == "PRECISE" & !is.na(gps_latitude) ~ gps_latitude,
+        TRUE ~ geo_latitude
+      ),
+      geo_longitude = case_when(
+        study_source == "PRECISE" & !is.na(gps_longitude) ~ gps_longitude,
+        TRUE ~ geo_longitude
+      )
+    ) %>%
+    select(-any_of(c("gps_latitude", "gps_longitude")))
+  
+  cat("✓ Merged PRECISE GPS coordinates\n")
+}
+
+# Match facilities
+environmental_linkage <- environmental_linkage %>%
+  mutate(facility_clean = tolower(trimws(geo_facility))) %>%
+  left_join(facility_geocodes %>% select(study_source, facility_clean, lat_fac = latitude, 
+                                          lon_fac = longitude, accuracy_fac = accuracy_level),
+            by = c("study_source", "facility_clean"), relationship = "many-to-one")
+
+# Match countries
+environmental_linkage <- environmental_linkage %>%
+  mutate(country_clean = tolower(trimws(geo_country))) %>%
+  left_join(country_centroids %>% select(country_clean, lat_ctr = latitude, lon_ctr = longitude),
+            by = "country_clean", relationship = "many-to-one")
+
+# Prioritize coordinates
+environmental_linkage <- environmental_linkage %>%
+  mutate(
+    env_latitude = case_when(
+      !is.na(geo_latitude) & geo_latitude >= -90 & geo_latitude <= 90 ~ geo_latitude,
+      !is.na(lat_fac) ~ lat_fac,
+      !is.na(lat_ctr) ~ lat_ctr,
+      TRUE ~ NA_real_
+    ),
+    env_longitude = case_when(
+      !is.na(geo_longitude) & geo_longitude >= -180 & geo_longitude <= 180 ~ geo_longitude,
+      !is.na(lon_fac) ~ lon_fac,
+      !is.na(lon_ctr) ~ lon_ctr,
+      TRUE ~ NA_real_
+    ),
+    coordinate_source = case_when(
+      !is.na(geo_latitude) & geo_latitude >= -90 ~ "direct_gps",
+      !is.na(lat_fac) ~ accuracy_fac,
+      !is.na(lat_ctr) ~ "country_centroid",
+      TRUE ~ "missing"
+    )
+  ) %>%
+  select(-facility_clean, -country_clean, -lat_fac, -lon_fac, -accuracy_fac, -lat_ctr, -lon_ctr)
+
+cat("\n=== COORDINATE SOURCE SUMMARY ===\n")
+coord_summary <- environmental_linkage %>%
+  count(study_source, coordinate_source) %>%
+  pivot_wider(names_from = coordinate_source, values_from = n, values_fill = 0)
+print(kable(coord_summary))
+
+# v3.3: Diagnostic - show coordinate coverage by country
+cat("\n=== COORDINATE COVERAGE BY COUNTRY (v3.3 diagnostic) ===\n")
+country_coord_summary <- environmental_linkage %>%
+  group_by(geo_country, study_source) %>%
+  summarise(
+    n_total = n(),
+    n_with_coords = sum(!is.na(env_latitude)),
+    pct_with_coords = round(100 * mean(!is.na(env_latitude)), 1),
+    coord_source = paste(unique(coordinate_source[!is.na(env_latitude)]), collapse = "/"),
+    .groups = "drop"
+  ) %>%
+  arrange(pct_with_coords, desc(n_total))
+print(kable(country_coord_summary, caption = "Countries with lowest coordinate coverage (for debugging)"))
+```
+
+# Phase 5: Calculate Temporal Windows
+
+```{r phase5-temporal}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                PHASE 5: CALCULATE TEMPORAL WINDOWS                         ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+environmental_linkage <- environmental_linkage %>%
+  mutate(
+    date_conception = case_when(
+      !is.na(conception_date_unified) ~ conception_date_unified,
+      !is.na(date_delivery) & !is.na(ga_weeks) ~ date_delivery - (ga_weeks * 7),
+      TRUE ~ as.Date(NA)
+    ),
+    gestational_age_days = as.numeric(date_delivery - date_conception),
+    gestational_age_weeks = gestational_age_days / 7,
+    trimester1_start = date_conception,
+    trimester1_end = date_conception + 91,
+    trimester2_start = date_conception + 92,
+    trimester2_end = date_conception + 182,
+    trimester3_start = date_conception + 183,
+    trimester3_end = date_delivery,
+    periconception_start = date_conception - 30,
+    periconception_end = date_conception + 60,
+    delivery_month = month(date_delivery),
+    delivery_year = year(date_delivery),
+    conception_month = month(date_conception),
+    conception_year = year(date_conception)
+  ) %>%
+  select(-conception_date_unified)
+
+cat("✓ Calculated temporal windows\n")
+```
+
+# Phase 6: Create Placeholders and Quality Flags
+
+```{r phase6-placeholders}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║            PHASE 6: CREATE PLACEHOLDERS AND FLAGS                          ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+environmental_linkage <- environmental_linkage %>%
+  mutate(
+    # Climate (will be populated)
+    env_temp_mean_delivery = NA_real_,
+    env_temp_mean_pregnancy = NA_real_,
+    env_humidity_delivery = NA_real_,
+    env_humidity_pregnancy = NA_real_,
+    env_precipitation_delivery = NA_real_,
+    env_precipitation_pregnancy = NA_real_,
+    env_heat_index_delivery = NA_real_,
+    
+    # Seasons (will be populated)
+    env_season_conception = NA_character_,
+    env_season_delivery = NA_character_,
+    
+    # Air quality (will be populated)
+    env_pm25_annual = NA_real_,
+    env_pm25_delivery = NA_real_,
+    env_pm25_pregnancy = NA_real_,
+    
+    # Topography (will be populated)
+    env_elevation = NA_real_,
+    env_slope = NA_real_,
+    
+    # Vegetation
+    env_ndvi_delivery = NA_real_,
+    env_ndvi_pregnancy = NA_real_,
+    
+    # Quality flags
+    has_coordinates = !is.na(env_latitude) & !is.na(env_longitude),
+    has_delivery_date = !is.na(date_delivery),
+    has_conception_date = !is.na(date_conception),
+    has_death_date = !is.na(date_death),
+    linkage_ready = has_coordinates & has_delivery_date
+  )
+
+cat(sprintf("✓ Records with coordinates: %s\n", format(sum(environmental_linkage$has_coordinates), big.mark = ",")))
+cat(sprintf("✓ Linkage-ready records: %s\n", format(sum(environmental_linkage$linkage_ready), big.mark = ",")))
+```
+
+---
+
+# Part B: Environmental Data Extraction
+
+# Phase 7: Extract Elevation and Slope
+
+```{r phase7-elevation}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                PHASE 7: EXTRACT ELEVATION AND SLOPE                        ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+elev_file <- file.path(DIR_SRTM, "srtm_elevation.tif")
+slope_file <- file.path(DIR_SRTM, "srtm_slope.tif")
+
+if (file.exists(elev_file) && file.exists(slope_file)) {
+  
+  cat("✅ SRTM files found\n")
+  
+  # Filter to records with coordinates
+  coords <- environmental_linkage %>%
+    filter(!is.na(env_latitude) & !is.na(env_longitude))
+  
+  if (nrow(coords) > 0) {
+    # Create SpatVector (same approach as working script)
+    coord_vect <- vect(coords, geom = c("env_longitude", "env_latitude"), crs = "EPSG:4326")
+    
+    # Extract elevation
+    cat("   Extracting elevation...")
+    elev_rast <- rast(elev_file)
+    elev_extracted <- terra::extract(elev_rast, coord_vect)
+    coords$env_elevation <- elev_extracted[[2]]
+    cat(sprintf(" ✅ (%.0f to %.0f m)\n",
+                min(coords$env_elevation, na.rm = TRUE),
+                max(coords$env_elevation, na.rm = TRUE)))
+    
+    # Extract slope
+    cat("   Extracting slope...")
+    slope_rast <- rast(slope_file)
+    slope_extracted <- terra::extract(slope_rast, coord_vect)
+    coords$env_slope <- slope_extracted[[2]]
+    cat(sprintf(" ✅ (%.1f to %.1f degrees)\n",
+                min(coords$env_slope, na.rm = TRUE),
+                max(coords$env_slope, na.rm = TRUE)))
+    
+    # Merge back
+    environmental_linkage <- environmental_linkage %>%
+      select(-env_elevation, -env_slope) %>%
+      left_join(coords %>% select(unified_id, env_elevation, env_slope), by = "unified_id")
+  }
+  
+} else {
+  cat("⚠️  SRTM files not found\n")
+  cat("   Run the optional SRTM download chunk at the end\n")
+}
+```
+
+# Phase 8: Extract ERA5 Climate Data
+
+```{r phase8-era5}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                PHASE 8: EXTRACT ERA5 CLIMATE DATA                          ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Check for ERA5 files
+if (file.exists(FILE_ERA5_TEMP)) {
+  
+  cat("✅ ERA5 files found\n")
+  
+  # Filter to records with coordinates (same approach as working script)
+  coords <- environmental_linkage %>%
+    filter(!is.na(env_latitude) & !is.na(env_longitude))
+  
+  cat(sprintf("   Records with coordinates: %s\n\n", format(nrow(coords), big.mark = ",")))
+  
+  if (nrow(coords) > 0) {
+    
+    # Extract temperature (t2m) - convert Kelvin to Celsius
+    cat("   Extracting temperature (t2m)...")
+    coords$env_temp_mean_delivery <- extract_era5_variable(FILE_ERA5_TEMP, "t2m", coords) - 273.15
+    cat(sprintf(" ✅ (%.1f to %.1f °C)\n",
+                min(coords$env_temp_mean_delivery, na.rm = TRUE),
+                max(coords$env_temp_mean_delivery, na.rm = TRUE)))
+    
+    # Extract dewpoint (d2m) and calculate humidity
+    cat("   Extracting dewpoint (d2m) and calculating humidity...")
+    dewpoint <- extract_era5_variable(FILE_ERA5_TEMP, "d2m", coords) - 273.15
+    temp <- coords$env_temp_mean_delivery
+    
+    # Magnus formula for relative humidity
+    coords$env_humidity_delivery <- 100 * exp((17.625 * dewpoint) / (243.04 + dewpoint)) /
+      exp((17.625 * temp) / (243.04 + temp))
+    coords$env_humidity_delivery <- pmin(pmax(coords$env_humidity_delivery, 0), 100)
+    cat(sprintf(" ✅ (%.1f to %.1f %%)\n",
+                min(coords$env_humidity_delivery, na.rm = TRUE),
+                max(coords$env_humidity_delivery, na.rm = TRUE)))
+    
+    # Extract precipitation (tp) - convert m to mm/month
+    if (file.exists(FILE_ERA5_PRECIP)) {
+      cat("   Extracting precipitation (tp)...")
+      coords$env_precipitation_delivery <- extract_era5_variable(FILE_ERA5_PRECIP, "tp", coords) * 1000 * 30
+      cat(sprintf(" ✅ (%.1f to %.1f mm/month)\n",
+                  min(coords$env_precipitation_delivery, na.rm = TRUE),
+                  max(coords$env_precipitation_delivery, na.rm = TRUE)))
+    }
+    
+    # Calculate Heat Index
+    cat("   Calculating heat index...")
+    T_f <- coords$env_temp_mean_delivery * 9/5 + 32  # Celsius to Fahrenheit
+    RH <- coords$env_humidity_delivery
+    
+    coords$env_heat_index_delivery <- -42.379 + 2.04901523*T_f + 10.14333127*RH -
+      0.22475541*T_f*RH - 0.00683783*T_f^2 - 0.05481717*RH^2 +
+      0.00122874*T_f^2*RH + 0.00085282*T_f*RH^2 - 0.00000199*T_f^2*RH^2
+    
+    coords$env_heat_index_delivery <- (coords$env_heat_index_delivery - 32) * 5/9
+    cat(sprintf(" ✅ (%.1f to %.1f °C)\n",
+                min(coords$env_heat_index_delivery, na.rm = TRUE),
+                max(coords$env_heat_index_delivery, na.rm = TRUE)))
+    
+    # Add pregnancy-period copies
+    coords$env_temp_mean_pregnancy <- coords$env_temp_mean_delivery
+    coords$env_humidity_pregnancy <- coords$env_humidity_delivery
+    coords$env_precipitation_pregnancy <- coords$env_precipitation_delivery
+    
+    # Merge back
+    climate_cols <- c("unified_id", "env_temp_mean_delivery", "env_temp_mean_pregnancy",
+                      "env_humidity_delivery", "env_humidity_pregnancy",
+                      "env_precipitation_delivery", "env_precipitation_pregnancy",
+                      "env_heat_index_delivery")
+    
+    environmental_linkage <- environmental_linkage %>%
+      select(-any_of(climate_cols[climate_cols != "unified_id"])) %>%
+      left_join(coords %>% select(any_of(climate_cols)), by = "unified_id")
+  }
+  
+} else {
+  cat("⚠️  ERA5 files not found\n")
+  cat("   Expected: ", FILE_ERA5_TEMP, "\n")
+}
+```
+
+# Phase 9: Extract PM2.5 Air Quality
+
+```{r phase9-pm25}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                PHASE 9: EXTRACT PM2.5 AIR QUALITY                          ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+pm25_files <- list.files(DIR_PM25, pattern = "\\.nc$", full.names = TRUE)
+
+if (length(pm25_files) > 0) {
+  
+  cat(sprintf("✅ Found %d PM2.5 files\n", length(pm25_files)))
+  
+  # Filter to records with coordinates and dates
+  coords <- environmental_linkage %>%
+    filter(!is.na(env_latitude) & !is.na(env_longitude) & !is.na(date_delivery))
+  
+  # Initialize PM2.5 columns in coords
+  coords$env_pm25_annual <- NA_real_
+  coords$env_pm25_delivery <- NA_real_
+  coords$env_pm25_pregnancy <- NA_real_
+  
+  # Get valid years (1998-2023)
+  years_available <- unique(na.omit(coords$delivery_year))
+  years_valid <- years_available[years_available >= 1998 & years_available <= 2023]
+  
+  cat(sprintf("   Processing %d years with PM2.5 data\n\n", length(years_valid)))
+  
+  for (yr in sort(years_valid)) {
+    pattern <- sprintf("%d01-%d12", yr, yr)
+    match_file <- pm25_files[grep(pattern, pm25_files)]
+    
+    if (length(match_file) == 0) next
+    
+    cat(sprintf("   %d: ", yr))
+    
+    tryCatch({
+      pm25_rast <- rast(match_file[1])
+      
+      yr_rows <- which(coords$delivery_year == yr)
+      if (length(yr_rows) == 0) {
+        cat("no records\n")
+        next
+      }
+      
+      yr_coords <- cbind(coords$env_longitude[yr_rows], coords$env_latitude[yr_rows])
+      extracted <- terra::extract(pm25_rast, yr_coords)
+      pm25_vals <- if(ncol(extracted) >= 2) extracted[[2]] else extracted[[1]]
+      
+      coords$env_pm25_annual[yr_rows] <- pm25_vals
+      coords$env_pm25_delivery[yr_rows] <- pm25_vals
+      coords$env_pm25_pregnancy[yr_rows] <- pm25_vals
+      
+      n_extracted <- sum(!is.na(pm25_vals))
+      cat(sprintf("✅ %d values (%.1f-%.1f µg/m³)\n", 
+                  n_extracted,
+                  min(pm25_vals, na.rm = TRUE),
+                  max(pm25_vals, na.rm = TRUE)))
+      
+    }, error = function(e) {
+      cat(sprintf("❌ Error: %s\n", e$message))
+    })
+  }
+  
+  # Merge back
+  pm25_cols <- c("unified_id", "env_pm25_annual", "env_pm25_delivery", "env_pm25_pregnancy")
+  environmental_linkage <- environmental_linkage %>%
+    select(-any_of(pm25_cols[pm25_cols != "unified_id"])) %>%
+    left_join(coords %>% select(any_of(pm25_cols)), by = "unified_id")
+  
+  n_pm25 <- sum(!is.na(environmental_linkage$env_pm25_annual))
+  cat(sprintf("\n   PM2.5 extracted for %s records (%.1f%%)\n",
+              format(n_pm25, big.mark = ","),
+              100 * n_pm25 / nrow(environmental_linkage)))
+  
+} else {
+  cat("⚠️  No PM2.5 files found in:", DIR_PM25, "\n")
+}
+```
+
+# Phase 10: Classify Seasons
+
+```{r phase10-seasons}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                PHASE 10: SEASONAL CLASSIFICATION                           ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+environmental_linkage <- environmental_linkage %>%
+  mutate(
+    env_season_delivery = case_when(
+      is.na(env_latitude) | is.na(delivery_month) ~ NA_character_,
+      env_latitude >= 0 & delivery_month %in% c(5:10) ~ "Wet",
+      env_latitude >= 0 & delivery_month %in% c(1:4, 11:12) ~ "Dry",
+      env_latitude < 0 & delivery_month %in% c(11:12, 1:4) ~ "Wet",
+      env_latitude < 0 & delivery_month %in% c(5:10) ~ "Dry",
+      TRUE ~ NA_character_
+    ),
+    env_season_conception = case_when(
+      is.na(env_latitude) | is.na(conception_month) ~ NA_character_,
+      env_latitude >= 0 & conception_month %in% c(5:10) ~ "Wet",
+      env_latitude >= 0 & conception_month %in% c(1:4, 11:12) ~ "Dry",
+      env_latitude < 0 & conception_month %in% c(11:12, 1:4) ~ "Wet",
+      env_latitude < 0 & conception_month %in% c(5:10) ~ "Dry",
+      TRUE ~ NA_character_
+    )
+  )
+
+cat(sprintf("✅ Seasons: Wet=%d, Dry=%d\n",
+            sum(environmental_linkage$env_season_delivery == "Wet", na.rm = TRUE),
+            sum(environmental_linkage$env_season_delivery == "Dry", na.rm = TRUE)))
+```
+
+# Phase 11: Quality Summary
+
+```{r phase11-summary}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║              PHASE 11: QUALITY SUMMARY                                     ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+cat("=== OVERALL SUMMARY ===\n")
+cat(sprintf("Total records:        %s\n", format(nrow(environmental_linkage), big.mark = ",")))
+cat(sprintf("With coordinates:     %s (%.1f%%)\n", 
+            format(sum(environmental_linkage$has_coordinates), big.mark = ","),
+            100 * mean(environmental_linkage$has_coordinates)))
+cat(sprintf("Linkage-ready:        %s (%.1f%%)\n", 
+            format(sum(environmental_linkage$linkage_ready), big.mark = ","),
+            100 * mean(environmental_linkage$linkage_ready)))
+
+cat("\n=== VARIABLE COMPLETENESS ===\n")
+env_vars <- c("env_elevation", "env_slope", "env_temp_mean_delivery", 
+              "env_humidity_delivery", "env_precipitation_delivery", "env_heat_index_delivery",
+              "env_pm25_annual", "env_season_delivery")
+
+for (v in env_vars) {
+  if (v %in% names(environmental_linkage)) {
+    pct <- mean(!is.na(environmental_linkage[[v]])) * 100
+    status <- if (pct > 50) "✅" else if (pct > 0) "⚠️" else "❌"
+    cat(sprintf("  %s %-30s %.1f%%\n", status, v, pct))
+  }
+}
+
+cat("\n=== BY STUDY ===\n")
+study_summary <- environmental_linkage %>%
+  group_by(study_source) %>%
+  summarise(
+    n = n(),
+    linkage_ready = sum(linkage_ready),
+    pct_ready = round(100 * mean(linkage_ready), 1),
+    stillbirths = sum(out_stillbirth == "Yes", na.rm = TRUE),
+    nnd = sum(out_nnd == "Yes", na.rm = TRUE),
+    .groups = "drop"
+  )
+print(kable(study_summary))
+```
+
+# Phase 12: Export Final Dataset
+
+```{r phase12-export}
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                   PHASE 12: EXPORT FINAL DATASET                           ║\n")
+cat("╚════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Save as environmental_linkage_final for the appendix
+environmental_linkage_final <- environmental_linkage
+
+# RDS
+saveRDS(environmental_linkage_final, file.path(DIR_OUTPUT, paste0(OUTPUT_FILE, ".rds")))
+cat(sprintf("✓ Saved: %s/%s.rds\n", DIR_OUTPUT, OUTPUT_FILE))
+
+# CSV
+write_csv(environmental_linkage_final, file.path(DIR_OUTPUT, paste0(OUTPUT_FILE, ".csv")))
+cat(sprintf("✓ Saved: %s/%s.csv\n", DIR_OUTPUT, OUTPUT_FILE))
+
+# Stata
+tryCatch({
+  haven::write_dta(environmental_linkage_final, file.path(DIR_OUTPUT, paste0(OUTPUT_FILE, ".dta")))
+  cat(sprintf("✓ Saved: %s/%s.dta\n", DIR_OUTPUT, OUTPUT_FILE))
+}, error = function(e) {
+  cat(sprintf("⚠️ Stata save failed: %s\n", e$message))
+})
+
+# Geocode references
+write_csv(facility_geocodes, file.path(DIR_OUTPUT, "facility_geocodes_reference.csv"))
+write_csv(country_centroids, file.path(DIR_OUTPUT, "country_centroids_reference.csv"))
+cat("✓ Saved: geocode reference tables\n")
+
+cat("\n")
+cat("════════════════════════════════════════════════════════════════════════════\n")
+cat("              🎉 PIPELINE COMPLETE! v", VERSION, " 🎉\n", sep = "")
+cat("════════════════════════════════════════════════════════════════════════════\n\n")
+
+cat(sprintf("Total Records:      %s\n", format(nrow(environmental_linkage_final), big.mark = ",")))
+cat(sprintf("Linkage-Ready:      %s (%.1f%%)\n", 
+            format(sum(environmental_linkage_final$linkage_ready), big.mark = ","),
+            100 * mean(environmental_linkage_final$linkage_ready)))
+```
+
+---
+
+# Appendix A: Join with Unified Dataset
+
+```{r appendix-join, eval=FALSE}
+# ============================================================================
+# JOINING ENVIRONMENTAL DATA BACK TO UNIFIED DATASET
+# ============================================================================
+
+# Load datasets
+unified <- readRDS("output/merged_unified_dataset_v10.16.rds")
+environmental <- readRDS("output/environmental/environmental_linkage_v3.3.rds")
+
+# Select environmental variables
+env_vars_to_merge <- environmental %>%
+  filter(linkage_ready) %>%
+  select(
+    unified_id,
+    env_latitude, env_longitude, coordinate_source,
+    env_elevation, env_slope,
+    env_temp_mean_delivery, env_humidity_delivery, 
+    env_precipitation_delivery, env_heat_index_delivery,
+    env_pm25_annual, env_pm25_delivery,
+    env_season_delivery, env_season_conception
+  )
+
+# Merge
+unified_with_env <- unified %>%
+  left_join(env_vars_to_merge, by = "unified_id")
+
+# ---- COALESCE DUPLICATE COLUMNS (run BEFORE any saving) ----
+env_cols <- names(unified_with_env)
+y_cols <- grep("\\.y$", env_cols, value = TRUE)
+base_names <- gsub("\\.y$", "", y_cols)
+
+for (bn in base_names) {
+  x_col <- paste0(bn, ".x")
+  y_col <- paste0(bn, ".y")
+  
+  if (x_col %in% env_cols && y_col %in% env_cols) {
+    tx <- class(unified_with_env[[x_col]])[1]
+    ty <- class(unified_with_env[[y_col]])[1]
+    if (tx != ty) {
+      if (tx %in% c("numeric", "double", "integer") && ty == "character") {
+        unified_with_env[[y_col]] <- suppressWarnings(as.numeric(unified_with_env[[y_col]]))
+      } else if (ty %in% c("numeric", "double", "integer") && tx == "character") {
+        unified_with_env[[x_col]] <- suppressWarnings(as.numeric(unified_with_env[[x_col]]))
+      } else {
+        unified_with_env[[x_col]] <- as.character(unified_with_env[[x_col]])
+        unified_with_env[[y_col]] <- as.character(unified_with_env[[y_col]])
+      }
+    }
+    unified_with_env[[x_col]] <- dplyr::coalesce(
+      unified_with_env[[x_col]], 
+      unified_with_env[[y_col]]
+    )
+    unified_with_env[[y_col]] <- NULL
+    names(unified_with_env)[names(unified_with_env) == x_col] <- bn
+    cat(glue("  Coalesced {bn}: {sum(!is.na(unified_with_env[[bn]]))} non-NA values\n"))
+  }
+}
+
+# ---- SAVE RDS (clean columns, dots OK) ----
+saveRDS(unified_with_env, "output/unified_dataset_with_env_v10.16.rds")
+
+# ---- SAVE CSV ----
+write_csv(unified_with_env, "output/unified_dataset_with_env_v10.16.csv")
+
+# ---- SAVE STATA (additional name cleaning needed) ----
+stata_out <- unified_with_env
+names(stata_out) <- gsub("\\.", "_", names(stata_out))
+names(stata_out) <- make.unique(names(stata_out), sep = "_")
+names(stata_out)[nchar(names(stata_out)) > 32] <- substr(
+  names(stata_out)[nchar(names(stata_out)) > 32], 1, 32
+)
+names(stata_out) <- make.unique(names(stata_out), sep = "_")
+haven::write_dta(stata_out, "output/unified_dataset_with_env_v10.16.dta")
+rm(stata_out)
+
+
+cat(sprintf("✅ Merged: %d records with environmental data\n", 
+            sum(!is.na(unified_with_env$env_latitude))))
+cat("✅ Saved: .rds, .csv, and .dta formats\n")
+```
+
+---
+
+# Appendix B: Download SRTM (Optional)
+
+```{r optional-srtm, eval=FALSE}
+if (!require(elevatr)) install.packages("elevatr")
+library(elevatr)
+
+bbox_coords <- matrix(c(-20, -35, 55, -35, 55, 40, -20, 40, -20, -35), ncol = 2, byrow = TRUE)
+bbox_poly <- st_polygon(list(bbox_coords)) %>% st_sfc(crs = 4326) %>% st_as_sf()
+
+elev_raster <- get_elev_raster(bbox_poly, z = 5, src = "aws")
+elev_terra <- rast(elev_raster)
+
+dir.create("data/srtm", recursive = TRUE, showWarnings = FALSE)
+writeRaster(elev_terra, "data/srtm/srtm_elevation.tif", overwrite = TRUE)
+
+slope_terra <- terrain(elev_terra, v = "slope", unit = "degrees")
+writeRaster(slope_terra, "data/srtm/srtm_slope.tif", overwrite = TRUE)
+
+cat("✅ SRTM download complete!\n")
+```
+
+---
+
+# Appendix C: Extract NDVI (Optional)
+
+```{r optional-ndvi, eval=FALSE}
+env_data <- readRDS(file.path(DIR_OUTPUT, paste0(OUTPUT_FILE, ".rds")))
+
+ndvi_files <- list.files(DIR_NDVI, pattern = "\\.(tif|nc)$", full.names = TRUE, recursive = TRUE)
+
+if (length(ndvi_files) > 0) {
+  valid_idx <- which(!is.na(env_data$env_latitude) & !is.na(env_data$env_longitude))
+  
+  ndvi_stack <- terra::rast(ndvi_files)
+  ndvi_mean <- terra::mean(ndvi_stack, na.rm = TRUE)
+  
+  coords <- cbind(env_data$env_longitude[valid_idx], env_data$env_latitude[valid_idx])
+  ndvi_vals <- terra::extract(ndvi_mean, coords)[[2]]
+  
+  if (max(abs(ndvi_vals), na.rm = TRUE) > 10) ndvi_vals <- ndvi_vals * 0.0001
+  
+  env_data$env_ndvi_delivery[valid_idx] <- ndvi_vals
+  env_data$env_ndvi_pregnancy[valid_idx] <- ndvi_vals
+  
+  saveRDS(env_data, file.path(DIR_OUTPUT, paste0(OUTPUT_FILE, ".rds")))
+  cat("✅ NDVI extracted and saved\n")
+}
+```
+
+---
+
+# Session Info
+
+```{r session-info}
+cat("Pipeline completed:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat("R version:", R.version.string, "\n")
+```

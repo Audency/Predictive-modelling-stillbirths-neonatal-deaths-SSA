@@ -1,0 +1,36 @@
+# Data files (sensitive - do not commit)
+*.dta
+*.rds
+*.csv
+*.sav
+*.xlsx
+*.xls
+data/
+output/
+outputs/
+intermediate/
+
+# R workspace
+.RData
+.RDataTmp
+.Rhistory
+.Rproj.user/
+
+# Rendered output
+*.html
+*.pdf
+*.pptx
+*.docx
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Temp
+*.tmp
+nul

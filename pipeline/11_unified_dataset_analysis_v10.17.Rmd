@@ -1,0 +1,2204 @@
+---
+title: "Unified Dataset Comprehensive Analysis v10.17"
+author: "Joseph Akuze (LSHTM)"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    highlight: tango
+version: '10.17'
+subtitle: "Stillbirth and Neonatal Death Prediction in Sub-Saharan Africa"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE,
+  fig.width = 11, fig.height = 7, dpi = 150
+)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(lubridate)
+  library(knitr)
+  library(scales)
+  library(viridis)
+  library(RColorBrewer)
+  library(officer)
+  library(rvg)
+  library(janitor)
+  library(kableExtra)
+  library(openxlsx)
+})
+
+VERSION <- "10.17"
+# ============================================================================
+# COLOR PALETTES
+# ============================================================================
+COLORS <- list(
+  studies = c("NCOPS"="#E74C3C","ALERT"="#3498DB","PRECISE"="#2ECC71",
+              "PTBi"="#9B59B6","EN-INDEPTH"="#F39C12","WHOMCS"="#1ABC9C",
+              "DHS"="#E67E22"),
+  outcomes = c("Stillbirth"="#C0392B","NND"="#8E44AD",
+               "Perinatal Death"="#2C3E50","Live Birth"="#27AE60"),
+  yesno = c("Yes"="#E74C3C","No"="#27AE60","NA"="#BDC3C7"),
+  sex = c("Male"="#3498DB","Female"="#E91E63",
+          "Missing"="#BDC3C7","Ambiguous"="#95A5A6"),
+  completeness = c("#C0392B","#E74C3C","#F39C12","#F1C40F","#2ECC71","#27AE60"),
+  delivery_mode = c("Vaginal spontaneous"="#27AE60","Caesarean"="#E74C3C",
+                    "Vaginal assisted"="#F39C12","Vaginal breech"="#9B59B6","Missing"="#BDC3C7"),
+  education = c("None"="#E74C3C","Primary"="#F39C12","Secondary"="#3498DB",
+                "Higher"="#27AE60","Missing"="#BDC3C7"),
+  hypertension = c("Normal"="#27AE60","Stage 1 Hypertension"="#F39C12",
+                   "Stage 2 Hypertension"="#E74C3C","Hypertension (stage unknown)"="#9B59B6","Missing"="#BDC3C7"),
+  sga = c("SGA (<10th centile)"="#E74C3C","AGA (10th-90th centile)"="#27AE60",
+          "LGA (>90th centile)"="#3498DB","Missing"="#BDC3C7"),
+  ga_method = c("Ballard score"="#3498DB","Clinical estimate (facility registry)"="#E74C3C",
+                "Clinical estimate (facility records)"="#9B59B6","Maternal recall"="#F39C12",
+                "Maternal recall (calendar)"="#E67E22","Missing"="#BDC3C7"),
+  study_design = c("Facility-based"="#E74C3C","Population-based"="#3498DB","Missing"="#BDC3C7"),
+  module = c("Prospective neonatal cohort"="#E74C3C","Facility birth registry"="#3498DB",
+             "Prospective cohort"="#2ECC71","Facility cross-sectional survey"="#9B59B6",
+             "Birth history + calendar"="#F39C12","Full pregnancy history"="#E67E22",
+             "Birth history only"="#1ABC9C","Missing"="#BDC3C7"),
+  qual = brewer.pal(8, "Set2"),
+  seq_blue = brewer.pal(9, "Blues"),
+  seq_red = brewer.pal(9, "Reds"),
+  seq_green = brewer.pal(9, "Greens")
+)
+
+# ============================================================================
+# CUSTOM THEME
+# ============================================================================
+theme_report <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title = element_text(face="bold", size=rel(1.3), color="#2C3E50", hjust=0),
+      plot.subtitle = element_text(color="#7F8C8D", size=rel(1.0), hjust=0),
+      plot.caption = element_text(color="#95A5A6", size=rel(0.8)),
+      axis.title = element_text(face="bold", color="#34495E"),
+      axis.text = element_text(color="#2C3E50"),
+      legend.title = element_text(face="bold"),
+      legend.position = "bottom",
+      panel.grid.major = element_line(color="#ECF0F1"),
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face="bold", size=rel(1.1)),
+      strip.background = element_rect(fill="#3498DB", color=NA),
+      strip.text.x = element_text(color="white")
+    )
+}
+theme_set(theme_report())
+```
+
+# Data Loading
+
+```{r load-data}
+DATA_PATH <- "output/unified_dataset_with_env_v10.17_cleaned.rds"
+if (!file.exists(DATA_PATH)) {
+  alt_paths <- c("output/merged_unified_dataset_v10.17.rds",
+                 "output/unified_dataset_v10.17.rds",
+                 "output/merged_unified_dataset_v10.16.rds",
+                 "output/merged_unified_dataset_v10.15.rds",
+                 "output/unified_dataset_v10.15.rds")
+  for (p in alt_paths) { if (file.exists(p)) { DATA_PATH <- p; break } }
+}
+if (!file.exists(DATA_PATH)) stop("Cannot find unified dataset. Please run the pipeline first.")
+
+unified <- readRDS(DATA_PATH)
+
+# ============================================================================
+# FIX: Ensure key numeric variables are truly numeric
+# ============================================================================
+numeric_vars <- c("out_birthweight_g","out_ga_weeks","out_ga_days","out_apgar_1min","out_apgar_5min","out_apgar_10min",
+                  "out_ageatdeath","out_birthweight_centile","out_birthweight_zscore","mat_age","mat_height","mat_weight",
+                  "mat_bmi","mat_muac","mat_sbp","mat_dbp","mat_parity","mat_gravidity","mat_anc_visits",
+                  "hh_num_rooms","hh_house_rooms","hh_size","hh_household_size","hh_monthly_income","hh_ppi_score",
+                  "hh_asset_score","loc_latitude","loc_longitude")
+for (v in numeric_vars) {
+  if (v %in% names(unified) && !is.numeric(unified[[v]])) {
+    unified[[v]] <- suppressWarnings(as.numeric(as.character(unified[[v]])))
+  }
+}
+
+# Detect v10.11+ features
+has_hypertension_stage <- "mat_hypertension_stage" %in% names(unified)
+has_sga_vars <- all(c("out_sga", "out_lga") %in% names(unified))
+has_sizeforGA <- "out_sizeforGA" %in% names(unified)
+has_stillbirth_thresholds <- all(c("out_stillbirth_20wks", "out_stillbirth_28wks") %in% names(unified))
+has_preterm_categories <- all(c("out_very_preterm", "out_extremely_preterm") %in% names(unified))
+has_bw_categories <- all(c("out_vlbw", "out_elbw") %in% names(unified))
+has_clinical_vars <- any(c("mat_eclampsia", "mat_diabetes", "mat_malaria", "mat_anaemia") %in% names(unified))
+has_ga_method <- "out_ga_method" %in% names(unified)
+has_study_design <- "study_design" %in% names(unified)
+has_module <- "module" %in% names(unified)
+has_sample_weight <- "sample_weight" %in% names(unified)
+has_dhs <- "DHS" %in% unique(unified$study_source)
+has_dhs_survey_id <- "dhs_survey_id" %in% names(unified)
+
+# Detect v10.17 features
+has_env_vars <- any(c("env_elevation", "env_temp_mean_delivery", "env_pm25_annual") %in% names(unified))
+has_birth_attendant <- "mat_birth_attendant" %in% names(unified)
+has_ethnicity <- "mat_ethnicity" %in% names(unified)
+has_ga_string <- "out_ga_string" %in% names(unified)
+has_env_season <- all(c("env_season_delivery", "env_season_conception") %in% names(unified))
+
+cat("====================================================================\n")
+cat("  UNIFIED DATASET COMPREHENSIVE ANALYSIS v", VERSION, "\n", sep="")
+cat("====================================================================\n\n")
+cat(sprintf("Data file: %s\n", DATA_PATH))
+cat(sprintf("Total records: %s\n", format(nrow(unified), big.mark=",")))
+cat(sprintf("Total variables: %d\n", ncol(unified)))
+cat(sprintf("Studies: %s\n", paste(unique(unified$study_source), collapse=", ")))
+cat(sprintf("Countries: %d\n", n_distinct(unified$mat_country, na.rm=TRUE)))
+cat("\n★ v10.11+ Features Detected:\n")
+cat(sprintf("  - Hypertension staging: %s\n  - SGA/LGA/AGA: %s\n  - Stillbirth thresholds: %s\n  - Preterm categories: %s\n  - LBW categories: %s\n",
+    ifelse(has_hypertension_stage,"Yes","No"), ifelse(has_sga_vars,"Yes","No"), ifelse(has_stillbirth_thresholds,"Yes","No"),
+    ifelse(has_preterm_categories,"Yes","No"), ifelse(has_bw_categories,"Yes","No")))
+cat(sprintf("★ v10.13 Features Detected:\n"))
+cat(sprintf("  - GA method tracking: %s\n  - Study design: %s\n  - Module classification: %s\n  - Sample weights: %s\n  - DHS data included: %s\n",
+    ifelse(has_ga_method,"Yes","No"), ifelse(has_study_design,"Yes","No"), ifelse(has_module,"Yes","No"),
+    ifelse(has_sample_weight,"Yes","No"), ifelse(has_dhs,"Yes","No")))
+cat(sprintf("★ v10.17 Features Detected:\n"))
+cat(sprintf("  - Environmental data: %s\n  - Birth attendant: %s\n  - Ethnicity: %s\n  - GA obstetric string: %s\n  - Season classification: %s\n",
+    ifelse(has_env_vars,"Yes","No"), ifelse(has_birth_attendant,"Yes","No"), ifelse(has_ethnicity,"Yes","No"),
+    ifelse(has_ga_string,"Yes","No"), ifelse(has_env_season,"Yes","No")))
+```
+
+# Executive Summary {.tabset}
+
+## Key Metrics Table
+
+```{r executive-summary-table}
+# ============================================================================
+# Executive summary as TABLE with correct rate formulas
+#   SBR = SB / (SB + LB) x 1000   i.e. SB / Total Births x 1000
+#   NND Rate = NND / LB x 1000
+#   PMR = (SB + NND) / Total Births x 1000
+# ============================================================================
+exec_by_study <- unified %>%
+  group_by(study_source) %>%
+  summarise(
+    N = n(),
+    Countries = n_distinct(mat_country, na.rm=TRUE),
+    Years = paste(range(studyyear, na.rm=TRUE), collapse="-"),
+    n_lb = sum(out_livebirth == "Yes", na.rm=TRUE),
+    n_sb = sum(out_stillbirth == "Yes", na.rm=TRUE),
+    n_nnd = sum(out_nnd == "Yes", na.rm=TRUE),
+    n_tb = n_lb + n_sb,
+    SBR = ifelse(n_tb>0, round(n_sb/n_tb*1000, 1), NA_real_),
+    NND_Rate = ifelse(n_lb>0, round(n_nnd/n_lb*1000, 1), NA_real_),
+    PMR = ifelse(n_tb>0, round((n_sb+n_nnd)/n_tb*1000, 1), NA_real_),
+    Preterm_pct = round(mean(out_preterm=="Yes", na.rm=TRUE)*100, 1),
+    LBW_pct = round(mean(out_lbw=="Yes", na.rm=TRUE)*100, 1),
+    Mean_GA = round(mean(out_ga_weeks, na.rm=TRUE), 1),
+    Mean_BW = round(mean(out_birthweight_g, na.rm=TRUE), 0),
+    Mean_Age = round(mean(mat_age, na.rm=TRUE), 1),
+    .groups="drop"
+  )
+
+exec_overall <- unified %>%
+  summarise(
+    study_source="OVERALL", N=n(),
+    Countries=n_distinct(mat_country, na.rm=TRUE),
+    Years=paste(range(studyyear, na.rm=TRUE), collapse="-"),
+    n_lb=sum(out_livebirth=="Yes", na.rm=TRUE),
+    n_sb=sum(out_stillbirth=="Yes", na.rm=TRUE),
+    n_nnd=sum(out_nnd=="Yes", na.rm=TRUE),
+    n_tb=n_lb+n_sb,
+    SBR=round(n_sb/n_tb*1000, 1),
+    NND_Rate=round(n_nnd/n_lb*1000, 1),
+    PMR=round((n_sb+n_nnd)/n_tb*1000, 1),
+    Preterm_pct=round(mean(out_preterm=="Yes", na.rm=TRUE)*100, 1),
+    LBW_pct=round(mean(out_lbw=="Yes", na.rm=TRUE)*100, 1),
+    Mean_GA=round(mean(out_ga_weeks, na.rm=TRUE), 1),
+    Mean_BW=round(mean(out_birthweight_g, na.rm=TRUE), 0),
+    Mean_Age=round(mean(mat_age, na.rm=TRUE), 1)
+  )
+
+exec_table <- bind_rows(exec_by_study, exec_overall)
+
+exec_display <- exec_table %>%
+  transmute(
+    Study=study_source, N=format(N, big.mark=","), Countries, Years,
+    `LB`=format(n_lb, big.mark=","), `SB`=format(n_sb, big.mark=","),
+    `NND`=format(n_nnd, big.mark=","),
+    `SBR(/1000)`=SBR, `NND Rate(/1000)`=NND_Rate, `PMR(/1000)`=PMR,
+    `Preterm%`=Preterm_pct, `LBW%`=LBW_pct,
+    `Mean GA`=Mean_GA, `Mean BW`=format(Mean_BW, big.mark=","), `Mean Age`=Mean_Age
+  )
+
+kable(exec_display,
+      caption="Executive Summary (SBR=SB/TotalBirths x1000; NNDRate=NND/LB x1000; PMR=(SB+NND)/TotalBirths x1000)",
+      align="lrrrlrrrrrrrrrr") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE, font_size=11) %>%
+  row_spec(nrow(exec_display), bold=TRUE, background="#ECF0F1")
+```
+
+## Rate Verification
+
+```{r rate-verification}
+rate_check <- exec_table %>%
+  filter(study_source != "OVERALL") %>%
+  transmute(
+    Study = study_source,
+    `SBR = SB / TB x 1000` = sprintf("%d / %d x 1000 = %.1f", n_sb, n_tb, SBR),
+    `NND = NND / LB x 1000` = sprintf("%d / %d x 1000 = %.1f", n_nnd, n_lb, NND_Rate),
+    `PMR = (SB+NND) / TB x 1000` = sprintf("(%d+%d) / %d x 1000 = %.1f", n_sb, n_nnd, n_tb, PMR)
+  )
+kable(rate_check, caption="Rate Calculation Verification") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE)
+```
+
+## ★ v10.11+ Extended Summary
+
+```{r v10-11-summary, eval=has_sga_vars}
+ext_summary <- unified %>% group_by(study_source) %>%
+  summarise(N=n(),
+    SGA_pct = round(mean(out_sga=="Yes", na.rm=TRUE)*100, 1),
+    LGA_pct = if("out_lga" %in% names(.)) round(mean(out_lga=="Yes", na.rm=TRUE)*100, 1) else NA_real_,
+    VeryPreterm_pct = if("out_very_preterm" %in% names(.)) round(mean(out_very_preterm=="Yes", na.rm=TRUE)*100, 1) else NA_real_,
+    ExtPreterm_pct = if("out_extremely_preterm" %in% names(.)) round(mean(out_extremely_preterm=="Yes", na.rm=TRUE)*100, 1) else NA_real_,
+    VLBW_pct = if("out_vlbw" %in% names(.)) round(mean(out_vlbw=="Yes", na.rm=TRUE)*100, 1) else NA_real_,
+    ELBW_pct = if("out_elbw" %in% names(.)) round(mean(out_elbw=="Yes", na.rm=TRUE)*100, 1) else NA_real_, .groups="drop")
+kable(ext_summary, col.names=c("Study","N","SGA%","LGA%","Very Preterm%","Extremely Preterm%","VLBW%","ELBW%"),
+      caption="★ v10.11+ Extended Summary: Growth and Preterm Classifications") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE)
+```
+
+## ★ v10.13 Study Metadata
+
+```{r v10-13-metadata-summary, eval=has_ga_method|has_study_design|has_module}
+meta_summary <- unified %>% group_by(study_source) %>%
+  summarise(
+    N = n(),
+    Study_Design = if (has_study_design) paste(unique(na.omit(study_design)), collapse="; ") else NA_character_,
+    Module = if (has_module) paste(unique(na.omit(module)), collapse="; ") else NA_character_,
+    GA_Method = if (has_ga_method) paste(unique(na.omit(out_ga_method)), collapse="; ") else NA_character_,
+    Has_Weights = if (has_sample_weight) sprintf("%.1f%%", mean(!is.na(sample_weight))*100) else NA_character_,
+    .groups="drop") %>%
+  arrange(desc(N))
+
+kable(meta_summary,
+      col.names=c("Study","N","Study Design","Module","GA Method","% with Weights"),
+      caption="★ v10.13: Study Metadata (Design, Module, GA Method, Sample Weights)") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE, font_size=10)
+```
+
+# Study Distribution
+
+## Records by Study
+
+```{r study-distribution, fig.height=7}
+study_dist <- unified %>%
+  count(study_source, name="n") %>%
+  mutate(pct=n/sum(n)*100) %>%
+  arrange(desc(n))
+
+ggplot(study_dist, aes(x=reorder(study_source,n), y=n, fill=study_source)) +
+  geom_col(width=0.75, show.legend=FALSE) +
+  geom_text(aes(label=sprintf("%s\n(%.1f%%)", format(n,big.mark=","), pct)),
+            hjust=-0.05, size=4.5, fontface="bold") +
+  coord_flip() +
+  scale_fill_manual(values=COLORS$studies) +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.25)), labels=comma) +
+  labs(title="Distribution of Records by Study",
+       subtitle=sprintf("%d harmonized perinatal datasets from Sub-Saharan Africa", n_distinct(unified$study_source)),
+       x=NULL, y="Number of Records")
+```
+
+## Geographic Distribution
+
+```{r country-distribution, fig.height=12}
+country_dist <- unified %>%
+  filter(!is.na(mat_country), trimws(as.character(mat_country))!="") %>%
+  count(mat_country, study_source, name="n") %>%
+  group_by(mat_country) %>%
+  mutate(total=sum(n)) %>%
+  ungroup() %>%
+  arrange(desc(total))
+
+all_countries <- country_dist %>% distinct(mat_country, total)
+n_countries <- nrow(all_countries)
+
+ggplot(country_dist, aes(x=reorder(mat_country, total), y=n, fill=study_source)) +
+  geom_col(width=0.8) +
+  geom_text(data=all_countries, aes(x=mat_country, y=total, label=format(total, big.mark=",")),
+            hjust=-0.1, inherit.aes=FALSE, size=3, fontface="bold") +
+  coord_flip() +
+  scale_fill_manual(values=COLORS$studies, name="Study") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.15)), labels=comma) +
+  labs(title=sprintf("All Countries by Record Count (N=%d)", n_countries),
+       subtitle="Coloured by contributing study", x=NULL, y="Number of Records") +
+  theme(legend.position="right")
+```
+
+## Temporal Distribution
+
+```{r year-distribution, fig.height=10}
+year_dist <- unified %>%
+  filter(!is.na(studyyear), studyyear>=2005, studyyear<=2025) %>%
+  count(studyyear, study_source, name="n")
+
+ggplot(year_dist, aes(x=factor(studyyear), y=n, fill=study_source)) +
+  geom_col(width=0.8, show.legend=FALSE) +
+  facet_wrap(~study_source, scales="free_y", ncol=2) +
+  scale_fill_manual(values=COLORS$studies) +
+  scale_y_continuous(labels=comma, expand=expansion(mult=c(0, 0.1))) +
+  labs(title="Temporal Distribution by Study",
+       subtitle="Records by year (note: y-axis scales differ between panels)",
+       x="Year", y="Number of Records") +
+  theme(axis.text.x=element_text(angle=45, hjust=1, size=8))
+```
+
+## ★ Study Design Distribution (v10.13)
+
+```{r study-design-distribution, fig.height=7, eval=has_study_design}
+design_dist <- unified %>%
+  mutate(study_design = ifelse(is.na(study_design)|trimws(as.character(study_design))=="", "Missing", as.character(study_design))) %>%
+  count(study_source, study_design, name="n") %>%
+  group_by(study_source) %>%
+  mutate(pct = n/sum(n)*100) %>%
+  ungroup()
+
+ggplot(design_dist, aes(x=study_source, y=n, fill=study_design)) +
+  geom_col(position="fill", width=0.75) +
+  geom_text(aes(label=ifelse(pct>=2, sprintf("%.0f%%", pct), "")),
+            position=position_fill(vjust=0.5), color="white", fontface="bold", size=3.5) +
+  scale_fill_manual(values=COLORS$study_design, name="Study Design") +
+  scale_y_continuous(labels=percent) +
+  labs(title="★ v10.13: Study Design by Study Source",
+       subtitle="Facility-based vs Population-based data collection",
+       x=NULL, y="Proportion") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## ★ Module Distribution (v10.13)
+
+```{r module-distribution, fig.height=8, eval=has_module}
+module_dist <- unified %>%
+  mutate(module = ifelse(is.na(module)|trimws(as.character(module))=="", "Missing", as.character(module))) %>%
+  count(study_source, module, name="n") %>%
+  group_by(study_source) %>%
+  mutate(pct = n/sum(n)*100) %>%
+  ungroup()
+
+ggplot(module_dist, aes(x=reorder(module, n), y=n, fill=study_source)) +
+  geom_col(width=0.75) +
+  geom_text(aes(label=format(n, big.mark=",")),
+            hjust=-0.05, size=3.5, fontface="bold") +
+  coord_flip() +
+  scale_fill_manual(values=COLORS$studies, name="Study") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.2)), labels=comma) +
+  labs(title="★ v10.13: Data Collection Module by Study",
+       subtitle="Each study contributes data via a specific collection methodology",
+       x=NULL, y="Number of Records") +
+  theme(legend.position="right")
+```
+
+## ★ DHS Survey Coverage (v10.13)
+
+```{r dhs-survey-coverage, fig.height=10, eval=has_dhs}
+dhs_subset <- unified %>% filter(study_source=="DHS")
+
+if (has_module) {
+  dhs_by_country <- dhs_subset %>%
+    filter(!is.na(mat_country), trimws(as.character(mat_country))!="") %>%
+    count(mat_country, module, name="n") %>%
+    group_by(mat_country) %>%
+    mutate(total=sum(n)) %>%
+    ungroup() %>%
+    arrange(desc(total))
+  
+  ggplot(dhs_by_country, aes(x=reorder(mat_country, total), y=n, fill=module)) +
+    geom_col(width=0.8) +
+    geom_text(data=dhs_by_country %>% distinct(mat_country, total),
+              aes(x=mat_country, y=total, label=format(total, big.mark=",")),
+              hjust=-0.1, inherit.aes=FALSE, size=3, fontface="bold") +
+    coord_flip() +
+    scale_fill_manual(values=COLORS$module, name="Module") +
+    scale_y_continuous(expand=expansion(mult=c(0, 0.15)), labels=comma) +
+    labs(title="★ v10.13: DHS Records by Country and Module",
+         subtitle=sprintf("DHS data: %s records across %d countries",
+                          format(nrow(dhs_subset), big.mark=","),
+                          n_distinct(dhs_subset$mat_country, na.rm=TRUE)),
+         x=NULL, y="Number of Records") +
+    theme(legend.position="right")
+} else {
+  dhs_by_country <- dhs_subset %>%
+    filter(!is.na(mat_country), trimws(as.character(mat_country))!="") %>%
+    count(mat_country, name="n") %>%
+    arrange(desc(n))
+  
+  ggplot(dhs_by_country, aes(x=reorder(mat_country, n), y=n)) +
+    geom_col(fill=COLORS$studies["DHS"], width=0.75) +
+    geom_text(aes(label=format(n, big.mark=",")), hjust=-0.1, size=3.5, fontface="bold") +
+    coord_flip() +
+    scale_y_continuous(expand=expansion(mult=c(0, 0.15)), labels=comma) +
+    labs(title="★ v10.13: DHS Records by Country",
+         subtitle=sprintf("N=%s records", format(nrow(dhs_subset), big.mark=",")),
+         x=NULL, y="Number of Records")
+}
+```
+
+# Primary Outcomes Analysis
+
+## Stillbirth {.tabset}
+
+### Stillbirth Rate by Study
+
+```{r stillbirth-by-study, fig.height=6}
+sb_by_study <- unified %>%
+  group_by(study_source) %>%
+  summarise(
+    n_sb = sum(out_stillbirth=="Yes", na.rm=TRUE),
+    n_lb = sum(out_livebirth=="Yes", na.rm=TRUE),
+    n_tb = n_sb + n_lb,
+    rate = ifelse(n_tb>0, n_sb/n_tb*1000, NA_real_),
+    .groups="drop"
+  ) %>%
+  filter(n_tb > 0) %>%
+  mutate(
+    ci_low = map2_dbl(n_sb, n_tb, ~binom.test(.x,.y)$conf.int[1]*1000),
+    ci_high = map2_dbl(n_sb, n_tb, ~binom.test(.x,.y)$conf.int[2]*1000),
+    label = sprintf("%.1f\n(n=%s/%s)", rate, format(n_sb, big.mark=","), format(n_tb, big.mark=","))
+  )
+
+ggplot(sb_by_study, aes(x=reorder(study_source, rate), y=rate)) +
+  geom_col(fill=COLORS$outcomes["Stillbirth"], width=0.7, alpha=0.9) +
+  geom_errorbar(aes(ymin=ci_low, ymax=ci_high), width=0.25, linewidth=0.8) +
+  geom_text(aes(label=label), hjust=-0.05, size=3.5, fontface="bold") +
+  coord_flip() +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.3))) +
+  labs(title="Stillbirth Rate by Study",
+       subtitle="SBR = SB / (SB+LB) x 1,000 with 95% CI",
+       x=NULL, y="Stillbirth Rate (per 1,000 total births)")
+```
+
+### Stillbirth by Country
+
+```{r stillbirth-by-country, fig.height=10}
+sb_by_country <- unified %>%
+  filter(!is.na(mat_country), trimws(as.character(mat_country))!="") %>%
+  group_by(mat_country) %>%
+  summarise(
+    n_sb=sum(out_stillbirth=="Yes", na.rm=TRUE),
+    n_lb=sum(out_livebirth=="Yes", na.rm=TRUE),
+    n_tb=n_sb+n_lb,
+    rate=ifelse(n_tb>0, n_sb/n_tb*1000, NA_real_),
+    .groups="drop"
+  ) %>%
+  filter(n_tb>=10) %>%
+  arrange(desc(rate))
+
+ggplot(sb_by_country, aes(x=reorder(mat_country, rate), y=rate)) +
+  geom_segment(aes(xend=mat_country, y=0, yend=rate), color="#BDC3C7", linewidth=1) +
+  geom_point(size=4, color=COLORS$outcomes["Stillbirth"]) +
+  geom_text(aes(label=sprintf("%.1f (n=%d/%d)", rate, n_sb, n_tb)),
+            hjust=-0.15, size=3, fontface="bold") +
+  coord_flip() +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.25))) +
+  labs(title=sprintf("Stillbirth Rate: All %d Countries (>=10 records)", nrow(sb_by_country)),
+       subtitle="SBR = SB / Total Births x 1,000",
+       x=NULL, y="Stillbirth Rate (per 1,000)")
+```
+
+### ★ Stillbirth by GA Threshold (v10.11+)
+
+```{r stillbirth-thresholds, fig.height=7, eval=has_stillbirth_thresholds}
+sb_threshold <- unified %>% filter(out_stillbirth == "Yes") %>% group_by(study_source) %>%
+  summarise(Total_SB=n(), SB_20wks=sum(out_stillbirth_20wks=="Yes", na.rm=TRUE),
+    SB_28wks=sum(out_stillbirth_28wks=="Yes", na.rm=TRUE), .groups="drop")
+sb_thresh_long <- sb_threshold %>% select(study_source, SB_20wks, SB_28wks) %>%
+  pivot_longer(-study_source, names_to="Threshold", values_to="Count") %>%
+  mutate(Threshold = recode(Threshold, "SB_20wks"="≥20 weeks (US/UK)", "SB_28wks"="≥28 weeks (WHO)"))
+ggplot(sb_thresh_long, aes(x=study_source, y=Count, fill=Threshold)) +
+  geom_col(position=position_dodge(width=0.8), width=0.7) +
+  geom_text(aes(label=Count), position=position_dodge(width=0.8), vjust=-0.5, size=3.5, fontface="bold") +
+  scale_fill_manual(values=c("≥20 weeks (US/UK)"="#E74C3C", "≥28 weeks (WHO)"="#8E44AD")) +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.15))) +
+  labs(title="★ v10.11+: Stillbirth by Gestational Age Threshold", subtitle="WHO (≥28wks) vs US/UK (≥20wks)", x=NULL, y="Number of Stillbirths") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Neonatal Death
+
+### NND Rate by Study
+
+```{r nnd-by-study, fig.height=6}
+nnd_by_study <- unified %>%
+  filter(out_livebirth=="Yes", !is.na(out_nnd)) %>%
+  group_by(study_source) %>%
+  summarise(
+    n_lb=n(), n_nnd=sum(out_nnd=="Yes", na.rm=TRUE),
+    rate=n_nnd/n_lb*1000, .groups="drop"
+  ) %>%
+  filter(n_lb>0) %>%
+  mutate(
+    ci_low=map2_dbl(n_nnd, n_lb, ~binom.test(.x,.y)$conf.int[1]*1000),
+    ci_high=map2_dbl(n_nnd, n_lb, ~binom.test(.x,.y)$conf.int[2]*1000),
+    label=sprintf("%.1f\n(n=%s/%s)", rate, format(n_nnd, big.mark=","), format(n_lb, big.mark=","))
+  )
+
+ggplot(nnd_by_study, aes(x=reorder(study_source, rate), y=rate)) +
+  geom_col(fill=COLORS$outcomes["NND"], width=0.7, alpha=0.9) +
+  geom_errorbar(aes(ymin=ci_low, ymax=ci_high), width=0.25, linewidth=0.8) +
+  geom_text(aes(label=label), hjust=-0.05, size=3.5, fontface="bold") +
+  coord_flip() +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.3))) +
+  labs(title="Neonatal Death Rate by Study",
+       subtitle="NND Rate = NND / Live Births x 1,000 with 95% CI\n(NCOPS: neonatal unit - all records are live births)",
+       x=NULL, y="NND Rate (per 1,000 live births)")
+```
+
+## Early vs Late Neonatal Death
+
+```{r early-late-nnd, fig.height=7}
+nnd_timing <- unified %>%
+  filter(out_livebirth=="Yes", out_nnd=="Yes") %>%
+  mutate(nnd_timing = case_when(
+    !is.na(out_nnd_early) & out_nnd_early=="Yes" ~ "Early NND (0-6 days)",
+    !is.na(out_nnd_late) & out_nnd_late=="Yes" ~ "Late NND (7-27 days)",
+    !is.na(out_ageatdeath) & out_ageatdeath < 7 ~ "Early NND (0-6 days)",
+    !is.na(out_ageatdeath) & out_ageatdeath >= 7 ~ "Late NND (7-27 days)",
+    TRUE ~ "Timing Unknown"
+  )) %>%
+  count(study_source, nnd_timing, name="n") %>%
+  group_by(study_source) %>%
+  mutate(pct=n/sum(n)*100, total_nnd=sum(n)) %>%
+  ungroup()
+
+nnd_timing$nnd_timing <- factor(nnd_timing$nnd_timing,
+  levels=c("Early NND (0-6 days)","Late NND (7-27 days)","Timing Unknown"))
+
+ggplot(nnd_timing, aes(x=study_source, y=n, fill=nnd_timing)) +
+  geom_col(position="stack", width=0.7) +
+  geom_text(aes(label=sprintf("%d\n(%.0f%%)", n, pct)),
+            position=position_stack(vjust=0.5), size=3.5, fontface="bold", color="white") +
+  scale_fill_manual(values=c("Early NND (0-6 days)"="#E74C3C",
+                              "Late NND (7-27 days)"="#F39C12",
+                              "Timing Unknown"="#BDC3C7"), name="NND Timing") +
+  labs(title="Early vs Late Neonatal Deaths by Study",
+       subtitle="Early NND = days 0-6; Late NND = days 7-27",
+       x=NULL, y="Number of Neonatal Deaths") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Age at Death Distribution
+
+```{r age-at-death-faceted, fig.height=10}
+death_data <- unified %>%
+  filter(out_livebirth=="Yes", out_nnd=="Yes", !is.na(out_ageatdeath),
+         out_ageatdeath >= 0, out_ageatdeath <= 28)
+
+if (nrow(death_data) > 5) {
+  death_data <- death_data %>%
+    mutate(age_day = as.integer(round(out_ageatdeath)))
+  
+  # Create complete grid of all days 0-28 for every study
+  all_days <- expand.grid(
+    study_source = unique(death_data$study_source),
+    age_day = 0:28
+  )
+  
+  death_counts <- death_data %>% 
+    count(study_source, age_day, name="n") %>%
+    right_join(all_days, by=c("study_source","age_day")) %>%
+    replace_na(list(n=0)) %>%
+    group_by(study_source) %>%
+    mutate(pct = n / sum(n) * 100,
+           study_total = sum(n)) %>%
+    ungroup() %>%
+    mutate(study_label = paste0(study_source, " (n=", study_total, ")"))
+  
+  # Order facets by total deaths descending
+  study_order <- death_counts %>% 
+    distinct(study_source, study_total, study_label) %>% 
+    arrange(desc(study_total))
+  death_counts$study_label <- factor(death_counts$study_label, levels=study_order$study_label)
+  
+  ggplot(death_counts, aes(x=age_day, y=n, fill=study_source)) +
+    geom_col(width=0.8, show.legend=FALSE) +
+    scale_x_continuous(breaks=0:28, labels=0:28) +
+    scale_fill_manual(values=COLORS$studies) +
+    facet_wrap(~study_label, scales="free_y", ncol=2) +
+    labs(title="Age at Death Distribution (Neonatal Deaths)",
+         subtitle=sprintf("Among %s neonatal deaths with recorded age at death | Days 0-28 | Independent y-axes",
+                          format(nrow(death_data), big.mark=",")),
+         x="Age at Death (days)", y="Number of Deaths") +
+    theme(axis.text.x=element_text(size=6, angle=0),
+          strip.text=element_text(face="bold", size=9),
+          strip.background=element_rect(fill="grey90"),
+          panel.spacing=unit(0.8, "lines"))
+} else {
+  cat("Insufficient age-at-death data for faceted plotting.\n")
+}
+```
+
+```{r age-at-death-stacked, fig.height=7}
+death_data2 <- unified %>%
+  filter(out_livebirth=="Yes", out_nnd=="Yes", !is.na(out_ageatdeath))
+
+if (nrow(death_data2) > 5) {
+  death_data2 <- death_data2 %>%
+    mutate(age_cat = case_when(
+      out_ageatdeath==0 ~ "Day 0", out_ageatdeath==1 ~ "Day 1",
+      out_ageatdeath<=3 ~ "Days 2-3", out_ageatdeath<=6 ~ "Days 4-6",
+      out_ageatdeath<=13 ~ "Days 7-13", out_ageatdeath<=27 ~ "Days 14-27",
+      TRUE ~ "28+ days"
+    ))
+  death_data2$age_cat <- factor(death_data2$age_cat,
+    levels=c("Day 0","Day 1","Days 2-3","Days 4-6","Days 7-13","Days 14-27","28+ days"))
+  death_counts2 <- death_data2 %>% count(study_source, age_cat, name="n")
+
+  ggplot(death_counts2, aes(x=age_cat, y=n, fill=study_source)) +
+    geom_col(position="stack", width=0.7) +
+    scale_fill_manual(values=COLORS$studies, name="Study") +
+    labs(title="Age at Death Distribution (Neonatal Deaths) - Stacked",
+         subtitle=sprintf("Among %s neonatal deaths with recorded age at death",
+                          format(nrow(death_data2), big.mark=",")),
+         x="Age at Death", y="Number of Deaths") +
+    theme(axis.text.x=element_text(angle=30, hjust=1))
+} else {
+  cat("Insufficient age-at-death data for stacked plotting.\n")
+}
+```
+
+# Birth Characteristics {.tabset}
+
+## Gestational Age by Study
+
+```{r ga-by-study, fig.height=10}
+ga_data <- unified %>%
+  filter(!is.na(out_ga_weeks), out_ga_weeks>=15, out_ga_weeks<=46)
+
+ggplot(ga_data, aes(x=out_ga_weeks, fill=study_source)) +
+  geom_histogram(binwidth=1, color="white", alpha=0.8, show.legend=FALSE) +
+  geom_vline(xintercept=37, linetype="dashed", color="#E74C3C", linewidth=0.8) +
+  facet_wrap(~study_source, scales="free_y", ncol=2) +
+  scale_fill_manual(values=COLORS$studies) +
+  scale_x_continuous(breaks=seq(15,46,5)) +
+  labs(title="Gestational Age Distribution by Study",
+       subtitle="Red dashed line = 37 weeks (preterm threshold)",
+       x="Gestational Age (weeks)", y="Count")
+```
+
+## GA Combined
+
+```{r ga-combined, fig.height=6}
+ggplot(ga_data, aes(x=out_ga_weeks, fill=study_source)) +
+  geom_histogram(binwidth=1, color="white", alpha=0.8) +
+  geom_vline(xintercept=37, linetype="dashed", color="#E74C3C", linewidth=1) +
+  scale_fill_manual(values=COLORS$studies, name="Study") +
+  scale_x_continuous(breaks=seq(15,46,2)) +
+  labs(title="Gestational Age Distribution (All Studies)",
+       subtitle=sprintf("N=%s | Mean=%.1f wks | Preterm=%.1f%%",
+         format(nrow(ga_data),big.mark=","), mean(ga_data$out_ga_weeks, na.rm=TRUE),
+         mean(unified$out_preterm=="Yes", na.rm=TRUE)*100),
+       x="Gestational Age (weeks)", y="Count")
+```
+
+## Preterm Rate by Study
+
+```{r preterm-by-study, fig.height=6}
+preterm_by_study <- unified %>%
+  filter(!is.na(out_preterm)) %>%
+  group_by(study_source) %>%
+  summarise(n_total=n(), n_preterm=sum(out_preterm=="Yes", na.rm=TRUE),
+            rate=n_preterm/n_total*100, .groups="drop")
+
+ggplot(preterm_by_study, aes(x=reorder(study_source,rate), y=rate, fill=study_source)) +
+  geom_col(width=0.7, show.legend=FALSE) +
+  geom_text(aes(label=sprintf("%.1f%%\n(n=%s)", rate, format(n_preterm, big.mark=","))),
+            hjust=-0.1, size=4, fontface="bold") +
+  coord_flip() + scale_fill_manual(values=COLORS$studies) +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.25))) +
+  labs(title="Preterm Birth Rate by Study", subtitle="Births <37 weeks gestation",
+       x=NULL, y="Preterm Rate (%)")
+```
+
+## ★ Preterm Categories (v10.11+)
+
+```{r preterm-categories, fig.height=8, eval=has_preterm_categories}
+preterm_cats <- unified %>% filter(!is.na(out_ga_weeks)) %>%
+  mutate(preterm_cat = case_when(
+    out_extremely_preterm == "Yes" ~ "Extremely preterm (<28 wks)",
+    out_very_preterm == "Yes" ~ "Very preterm (28-31 wks)",
+    out_preterm == "Yes" ~ "Moderate/Late preterm (32-36 wks)",
+    TRUE ~ "Term (≥37 wks)")) %>%
+  count(study_source, preterm_cat, name="n") %>% group_by(study_source) %>% mutate(pct = n/sum(n)*100) %>% ungroup()
+preterm_cats$preterm_cat <- factor(preterm_cats$preterm_cat,
+  levels = c("Extremely preterm (<28 wks)", "Very preterm (28-31 wks)", "Moderate/Late preterm (32-36 wks)", "Term (≥37 wks)"))
+ggplot(preterm_cats, aes(x=study_source, y=pct, fill=preterm_cat)) +
+  geom_col(position="stack", width=0.75) +
+  scale_fill_manual(values=c("Extremely preterm (<28 wks)"="#8E44AD","Very preterm (28-31 wks)"="#E74C3C",
+    "Moderate/Late preterm (32-36 wks)"="#F39C12","Term (≥37 wks)"="#27AE60"), name="GA Category") +
+  scale_y_continuous(labels=function(x) paste0(x, "%")) +
+  labs(title="★ v10.11+: Preterm Birth Categories by Study", x=NULL, y="Percentage") + theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Birthweight by Study
+
+```{r bw-by-study, fig.height=12}
+bw_data <- unified %>%
+  filter(!is.na(out_birthweight_g), out_birthweight_g>=200, out_birthweight_g<=7000)
+
+ggplot(bw_data, aes(x=out_birthweight_g, fill=study_source)) +
+  geom_histogram(binwidth=100, color="white", alpha=0.8, show.legend=FALSE) +
+  geom_vline(xintercept=2500, linetype="dashed", color="#E74C3C", linewidth=0.8) +
+  facet_wrap(~study_source, scales="free_y", ncol=2) +
+  scale_fill_manual(values=COLORS$studies) +
+  scale_x_continuous(labels=comma) +
+  labs(title="Birthweight Distribution by Study",
+       subtitle="Red dashed line = 2,500g (LBW threshold)",
+       x="Birthweight (grams)", y="Count")
+```
+
+## BW Boxplot
+
+```{r bw-boxplot, fig.height=7}
+ggplot(bw_data, aes(x=study_source, y=out_birthweight_g, fill=study_source)) +
+  geom_boxplot(width=0.6, outlier.color="#E74C3C", outlier.size=2, outlier.alpha=0.5,
+               show.legend=FALSE) +
+  geom_hline(yintercept=2500, linetype="dashed", color="#E74C3C", linewidth=0.8) +
+  scale_fill_manual(values=COLORS$studies) +
+  scale_y_continuous(labels=comma) +
+  labs(title="Birthweight Box Plot by Study (Outliers in Red)",
+       subtitle=sprintf("N=%s | Red dots = outlier values", format(nrow(bw_data), big.mark=",")),
+       x=NULL, y="Birthweight (grams)") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## LBW Rate by Study
+
+```{r lbw-by-study, fig.height=6}
+lbw_by_study <- unified %>%
+  filter(!is.na(out_lbw)) %>%
+  group_by(study_source) %>%
+  summarise(n_total=n(), n_lbw=sum(out_lbw=="Yes", na.rm=TRUE),
+            rate=n_lbw/n_total*100, .groups="drop")
+
+ggplot(lbw_by_study, aes(x=reorder(study_source,rate), y=rate, fill=study_source)) +
+  geom_col(width=0.7, show.legend=FALSE) +
+  geom_text(aes(label=sprintf("%.1f%%\n(n=%s)", rate, format(n_lbw, big.mark=","))),
+            hjust=-0.1, size=4, fontface="bold") +
+  coord_flip() + scale_fill_manual(values=COLORS$studies) +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.25))) +
+  labs(title="Low Birthweight Rate by Study (<2500g)", x=NULL, y="LBW Rate (%)")
+```
+
+## ★ LBW Categories (v10.11+)
+
+```{r lbw-categories, fig.height=8, eval=has_bw_categories}
+bw_cats <- unified %>% filter(!is.na(out_birthweight_g)) %>%
+  mutate(bw_cat = case_when(out_elbw == "Yes" ~ "ELBW (<1000g)", out_vlbw == "Yes" ~ "VLBW (1000-1499g)",
+    out_lbw == "Yes" ~ "LBW (1500-2499g)", out_birthweight_g >= 4000 ~ "Macrosomia (≥4000g)", TRUE ~ "Normal (2500-3999g)")) %>%
+  count(study_source, bw_cat, name="n") %>% group_by(study_source) %>% mutate(pct = n/sum(n)*100) %>% ungroup()
+bw_cats$bw_cat <- factor(bw_cats$bw_cat, levels = c("ELBW (<1000g)", "VLBW (1000-1499g)", "LBW (1500-2499g)", "Normal (2500-3999g)", "Macrosomia (≥4000g)"))
+ggplot(bw_cats, aes(x=study_source, y=pct, fill=bw_cat)) +
+  geom_col(position="stack", width=0.75) +
+  scale_fill_manual(values=c("ELBW (<1000g)"="#8E44AD","VLBW (1000-1499g)"="#E74C3C","LBW (1500-2499g)"="#F39C12",
+    "Normal (2500-3999g)"="#27AE60","Macrosomia (≥4000g)"="#3498DB"), name="BW Category") +
+  scale_y_continuous(labels=function(x) paste0(x, "%")) +
+  labs(title="★ v10.11+: Birthweight Categories by Study", x=NULL, y="Percentage") + theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## ★ Size for GA (v10.11+)
+
+```{r sga-distribution, fig.height=8, eval=has_sizeforGA}
+sga_data <- unified %>% filter(!is.na(out_sizeforGA)) %>%
+  count(study_source, out_sizeforGA, name="n") %>% group_by(study_source) %>% mutate(pct = n/sum(n)*100) %>% ungroup()
+sga_data$out_sizeforGA <- factor(sga_data$out_sizeforGA, levels = c("SGA (<10th centile)", "AGA (10th-90th centile)", "LGA (>90th centile)"))
+ggplot(sga_data, aes(x=study_source, y=pct, fill=out_sizeforGA)) +
+  geom_col(position="stack", width=0.75) +
+  geom_text(aes(label=ifelse(pct >= 3, sprintf("%.1f%%", pct), "")), position=position_stack(vjust=0.5), color="white", fontface="bold", size=3.5) +
+  scale_fill_manual(values=COLORS$sga, name="Size for GA") + scale_y_continuous(labels=function(x) paste0(x, "%")) +
+  labs(title="★ v10.11+: Size for Gestational Age by Study", subtitle="SGA<10th | AGA 10-90th | LGA>90th centile", x=NULL, y="Percentage") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## ★ GA Method Distribution (v10.13)
+
+```{r ga-method-distribution, fig.height=8, eval=has_ga_method}
+ga_method_data <- unified %>%
+  mutate(out_ga_method = ifelse(is.na(out_ga_method)|trimws(as.character(out_ga_method))=="", "Missing", as.character(out_ga_method))) %>%
+  count(study_source, out_ga_method, name="n") %>%
+  group_by(study_source) %>%
+  mutate(pct = n/sum(n)*100) %>%
+  ungroup()
+
+ggplot(ga_method_data, aes(x=study_source, y=n, fill=out_ga_method)) +
+  geom_col(position="fill", width=0.75) +
+  geom_text(aes(label=ifelse(pct>=2, sprintf("%.0f%%", pct), "")),
+            position=position_fill(vjust=0.5), color="white", fontface="bold", size=3.5) +
+  scale_fill_manual(values=COLORS$ga_method, name="GA Method") +
+  scale_y_continuous(labels=percent) +
+  labs(title="★ v10.13: Gestational Age Measurement Method by Study",
+       subtitle="How GA was determined in each study (Ballard/Clinical/Maternal recall)",
+       x=NULL, y="Proportion") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+```{r ga-method-table, eval=has_ga_method}
+ga_method_tbl <- unified %>%
+  mutate(out_ga_method = ifelse(is.na(out_ga_method)|trimws(as.character(out_ga_method))=="", "Missing", as.character(out_ga_method))) %>%
+  count(study_source, out_ga_method, name="n") %>%
+  pivot_wider(names_from=study_source, values_from=n, values_fill=0) %>%
+  mutate(Total = rowSums(across(where(is.numeric))))
+
+kable(ga_method_tbl, caption="★ v10.13: GA Method by Study Source (counts)") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE) %>%
+  row_spec(nrow(ga_method_tbl), bold=FALSE)
+```
+
+```{r ga-method-ga-comparison, fig.height=7, eval=has_ga_method}
+# Compare GA distribution by measurement method
+ga_by_method <- unified %>%
+  filter(!is.na(out_ga_weeks), out_ga_weeks>=15, out_ga_weeks<=46,
+         !is.na(out_ga_method), trimws(as.character(out_ga_method))!="") %>%
+  mutate(out_ga_method = factor(out_ga_method))
+
+if (nrow(ga_by_method) > 20) {
+  ga_summary <- ga_by_method %>%
+    group_by(out_ga_method) %>%
+    summarise(n=n(), mean_ga=round(mean(out_ga_weeks),1), median_ga=median(out_ga_weeks),
+              sd_ga=round(sd(out_ga_weeks),1), pct_preterm=round(mean(out_preterm=="Yes", na.rm=TRUE)*100,1),
+              .groups="drop")
+  
+  kable(ga_summary,
+        col.names=c("GA Method","N","Mean GA","Median GA","SD","Preterm %"),
+        caption="★ v10.13: Gestational Age Statistics by Measurement Method") %>%
+    kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+  
+  ggplot(ga_by_method, aes(x=out_ga_method, y=out_ga_weeks, fill=out_ga_method)) +
+    geom_boxplot(width=0.6, outlier.alpha=0.3, show.legend=FALSE) +
+    geom_hline(yintercept=37, linetype="dashed", color="#E74C3C", linewidth=0.8) +
+    scale_fill_manual(values=COLORS$ga_method) +
+    labs(title="★ v10.13: GA Distribution by Measurement Method",
+         subtitle="Red dashed line = 37 weeks (preterm threshold)",
+         x="GA Measurement Method", y="Gestational Age (weeks)") +
+    theme(axis.text.x=element_text(angle=30, hjust=1))
+}
+```
+
+## Infant Sex Distribution
+
+```{r sex-distribution, fig.height=7}
+sex_data <- unified %>%
+  mutate(sex_clean = case_when(
+    is.na(out_infant_sex) | trimws(as.character(out_infant_sex))=="" ~ "Missing",
+    out_infant_sex %in% c("Male","Female") ~ as.character(out_infant_sex),
+    out_infant_sex %in% c("Indeterminate","Unknown","Ambiguous") ~ "Ambiguous",
+    TRUE ~ "Missing"
+  )) %>%
+  count(study_source, sex_clean, name="n") %>%
+  group_by(study_source) %>%
+  mutate(pct=n/sum(n)*100) %>%
+  ungroup()
+
+sex_data$sex_clean <- factor(sex_data$sex_clean, levels=c("Male","Female","Ambiguous","Missing"))
+
+ggplot(sex_data, aes(x=study_source, y=n, fill=sex_clean)) +
+  geom_col(position="fill", width=0.75) +
+  geom_text(aes(label=ifelse(pct>=2, sprintf("%.1f%%", pct), "")),
+            position=position_fill(vjust=0.5), color="white", fontface="bold", size=3.5) +
+  scale_fill_manual(values=COLORS$sex, name="Sex") +
+  scale_y_continuous(labels=percent) +
+  labs(title="Infant Sex Distribution by Study",
+       subtitle="Including Missing and Indeterminate categories",
+       x=NULL, y="Proportion") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Apgar Score Distribution
+
+```{r apgar-boxplot, fig.height=8}
+apgar_data <- unified %>%
+  filter(!is.na(out_apgar_5min), out_apgar_5min>=0, out_apgar_5min<=10) %>%
+  mutate(birth_outcome = case_when(
+    out_stillbirth=="Yes" ~ "Stillbirth",
+    out_nnd=="Yes" ~ "Neonatal Death",
+    out_livebirth=="Yes" ~ "Survived",
+    TRUE ~ "Unknown"
+  )) %>%
+  filter(birth_outcome != "Unknown")
+
+apgar_data$birth_outcome <- factor(apgar_data$birth_outcome,
+  levels=c("Stillbirth","Neonatal Death","Survived"))
+
+ggplot(apgar_data, aes(x=birth_outcome, y=out_apgar_5min, fill=birth_outcome)) +
+  geom_boxplot(width=0.6, outlier.alpha=0.3) +
+  scale_fill_manual(values=c("Stillbirth"="#C0392B","Neonatal Death"="#8E44AD","Survived"="#27AE60"),
+                    name="Outcome") +
+  labs(title="5-Minute Apgar Score by Birth Outcome",
+       subtitle=sprintf("N=%s records with Apgar data", format(nrow(apgar_data), big.mark=",")),
+       x="Birth Outcome", y="5-Minute Apgar Score")
+```
+
+```{r apgar-by-study, fig.height=10}
+ggplot(apgar_data, aes(x=birth_outcome, y=out_apgar_5min, fill=birth_outcome)) +
+  geom_boxplot(width=0.6, outlier.alpha=0.3) +
+  facet_wrap(~study_source, ncol=2) +
+  scale_fill_manual(values=c("Stillbirth"="#C0392B","Neonatal Death"="#8E44AD","Survived"="#27AE60"),
+                    name="Outcome") +
+  labs(title="5-Minute Apgar Score by Outcome and Study",
+       x="Birth Outcome", y="5-Minute Apgar Score") +
+  theme(axis.text.x=element_text(angle=30, hjust=1, size=8))
+```
+
+# Maternal Characteristics {.tabset}
+
+## Maternal Age by Study
+
+```{r mat-age-by-study, fig.height=10}
+age_data <- unified %>%
+  filter(!is.na(mat_age), mat_age>=10, mat_age<=60)
+
+ggplot(age_data, aes(x=mat_age, fill=study_source)) +
+  geom_histogram(binwidth=2, color="white", alpha=0.8, show.legend=FALSE) +
+  geom_vline(xintercept=c(18,35), linetype="dashed", color="#E74C3C", linewidth=0.8) +
+  facet_wrap(~study_source, scales="free_y", ncol=2) +
+  scale_fill_manual(values=COLORS$studies) +
+  labs(title="Maternal Age Distribution by Study",
+       subtitle="Red dashed lines at 18 and 35 years (risk thresholds)",
+       x="Maternal Age (years)", y="Count")
+```
+
+## Age Categories
+
+```{r mat-age-categories, fig.height=6}
+age_cat <- unified %>%
+  filter(!is.na(mat_age)) %>%
+  mutate(age_group=case_when(
+    mat_age<18 ~ "<18 (Adolescent)", mat_age<25 ~ "18-24", mat_age<30 ~ "25-29",
+    mat_age<35 ~ "30-34", mat_age<40 ~ "35-39", TRUE ~ "40+ (Advanced)")) %>%
+  count(study_source, age_group, name="n") %>%
+  group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+
+age_cat$age_group <- factor(age_cat$age_group,
+  levels=c("<18 (Adolescent)","18-24","25-29","30-34","35-39","40+ (Advanced)"))
+
+ggplot(age_cat, aes(x=study_source, y=pct, fill=age_group)) +
+  geom_col(position="stack", width=0.75) +
+  scale_fill_viridis_d(option="turbo", name="Age Group") +
+  labs(title="Maternal Age Categories by Study", x=NULL, y="Percentage") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Education Level
+
+```{r education-dist, fig.height=7}
+if ("mat_education" %in% names(unified)) {
+  edu_data <- unified %>%
+    mutate(mat_education=ifelse(is.na(mat_education)|trimws(as.character(mat_education))=="","Missing",as.character(mat_education))) %>%
+    count(study_source, mat_education, name="n") %>%
+    group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+  edu_levels <- c("None", "Primary", "Secondary", "Higher", "Missing")
+  edu_data$mat_education <- factor(edu_data$mat_education, levels = edu_levels[edu_levels %in% unique(edu_data$mat_education)])
+  ggplot(edu_data, aes(x=study_source, y=n, fill=mat_education)) +
+    geom_col(position="fill", width=0.75) + scale_fill_manual(values=COLORS$education, name="Education") +
+    scale_y_continuous(labels=percent) +
+    labs(title="Maternal Education Level by Study", subtitle="★ v10.11+: Standardized (None/Primary/Secondary/Higher)", x=NULL, y="Proportion") +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+}
+```
+
+## Delivery Mode
+
+```{r delivery-mode, fig.height=7}
+if ("mat_delivery_mode" %in% names(unified)) {
+  mode_data <- unified %>%
+    mutate(mat_delivery_mode=ifelse(is.na(mat_delivery_mode)|trimws(as.character(mat_delivery_mode))=="","Missing",as.character(mat_delivery_mode))) %>%
+    count(study_source, mat_delivery_mode, name="n") %>%
+    group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+  mode_levels <- c("Vaginal spontaneous", "Caesarean", "Vaginal assisted", "Vaginal breech", "Missing")
+  mode_data$mat_delivery_mode <- factor(mode_data$mat_delivery_mode, levels = mode_levels[mode_levels %in% unique(mode_data$mat_delivery_mode)])
+  ggplot(mode_data, aes(x=study_source, y=n, fill=mat_delivery_mode)) +
+    geom_col(position="fill", width=0.75) + scale_fill_manual(values=COLORS$delivery_mode, name="Delivery Mode") +
+    scale_y_continuous(labels=percent) +
+    labs(title="Delivery Mode by Study", subtitle="★ v10.11+: Standardized categories", x=NULL, y="Proportion") +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+}
+```
+
+## Marital Status
+
+```{r marital-status, fig.height=7}
+if ("mat_marital_status" %in% names(unified)) {
+  marital_data <- unified %>%
+    mutate(mat_marital_status=ifelse(is.na(mat_marital_status)|trimws(as.character(mat_marital_status))=="","Missing",as.character(mat_marital_status))) %>%
+    count(study_source, mat_marital_status, name="n") %>%
+    group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+  ggplot(marital_data, aes(x=study_source, y=n, fill=mat_marital_status)) +
+    geom_col(position="fill", width=0.75) +
+    scale_fill_brewer(palette="Paired", name="Marital Status") +
+    scale_y_continuous(labels=percent) +
+    labs(title="Marital Status by Study", x=NULL, y="Proportion") +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+}
+```
+
+## ★ Hypertension Staging (v10.11+)
+
+```{r hypertension-staging, fig.height=8, eval=has_hypertension_stage}
+hyp_data <- unified %>% mutate(mat_hypertension_stage = ifelse(is.na(mat_hypertension_stage)|trimws(as.character(mat_hypertension_stage))=="", "Missing", as.character(mat_hypertension_stage))) %>%
+  count(study_source, mat_hypertension_stage, name="n") %>% group_by(study_source) %>% mutate(pct = n/sum(n)*100) %>% ungroup()
+hyp_levels <- c("Normal", "Stage 1 Hypertension", "Stage 2 Hypertension", "Hypertension (stage unknown)", "Missing")
+hyp_data$mat_hypertension_stage <- factor(hyp_data$mat_hypertension_stage, levels = hyp_levels[hyp_levels %in% unique(hyp_data$mat_hypertension_stage)])
+ggplot(hyp_data, aes(x=study_source, y=pct, fill=mat_hypertension_stage)) +
+  geom_col(position="stack", width=0.75) + scale_fill_manual(values=COLORS$hypertension, name="Hypertension Status") +
+  scale_y_continuous(labels=function(x) paste0(x, "%")) +
+  labs(title="★ v10.11+: Hypertension Staging by Study", subtitle="Stage 1 (≥140/90) | Stage 2 (≥160/100)", x=NULL, y="Percentage") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## ★ Clinical Risk Factors (v10.11+)
+
+```{r clinical-risk-factors, fig.height=10, eval=has_clinical_vars}
+clinical_vars <- c("mat_hypertension", "mat_preeclampsia", "mat_eclampsia", "mat_diabetes", "mat_malaria", "mat_anaemia", "mat_hiv_status")
+clinical_vars <- clinical_vars[clinical_vars %in% names(unified)]
+if (length(clinical_vars) > 0) {
+  clinical_prev <- unified %>% group_by(study_source) %>%
+    summarise(across(all_of(clinical_vars), ~round(mean(.x == "Yes", na.rm=TRUE)*100, 1)), .groups="drop") %>%
+    pivot_longer(-study_source, names_to="Risk_Factor", values_to="Prevalence") %>%
+    mutate(Risk_Factor = gsub("mat_", "", Risk_Factor) %>% str_to_title())
+  ggplot(clinical_prev, aes(x=Risk_Factor, y=Prevalence, fill=study_source)) +
+    geom_col(position=position_dodge(width=0.8), width=0.7) + scale_fill_manual(values=COLORS$studies, name="Study") +
+    scale_y_continuous(expand=expansion(mult=c(0, 0.1))) +
+    labs(title="★ v10.11+: Clinical Risk Factor Prevalence by Study", x="Risk Factor", y="Prevalence (%)") +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+}
+```
+
+## Religion & Wealth
+
+```{r religion-wealth, fig.height=14}
+p_list <- list()
+
+if ("mat_religion" %in% names(unified)) {
+  rel_data <- unified %>%
+    mutate(mat_religion=ifelse(is.na(mat_religion)|trimws(as.character(mat_religion))=="","Missing",as.character(mat_religion))) %>%
+    count(study_source, mat_religion, name="n") %>%
+    group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+  p_list[["rel"]] <- ggplot(rel_data, aes(x=study_source, y=n, fill=mat_religion)) +
+    geom_col(position="fill", width=0.75) +
+    scale_fill_brewer(palette="Set2", name="Religion") +
+    scale_y_continuous(labels=percent) +
+    labs(title="v10.17: Religion by Study (Harmonised Labels)",
+         subtitle="DHS religion decoded from haven labels and harmonised to 5 categories",
+         x=NULL, y="Proportion") +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+}
+
+if ("hh_wealth_quintile" %in% names(unified)) {
+  wq_data <- unified %>%
+    mutate(wq=ifelse(is.na(hh_wealth_quintile)|trimws(as.character(hh_wealth_quintile))=="",
+                     "Missing", as.character(hh_wealth_quintile))) %>%
+    count(study_source, wq, name="n") %>%
+    group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+  p_list[["wq"]] <- ggplot(wq_data, aes(x=study_source, y=n, fill=wq)) +
+    geom_col(position="fill", width=0.75) +
+    scale_fill_viridis_d(name="Wealth Quintile") +
+    scale_y_continuous(labels=percent) +
+    labs(title="Wealth Quintile by Study", x=NULL, y="Proportion") +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+}
+
+if (length(p_list) > 0) {
+  for (p in p_list) print(p)
+}
+```
+
+## v10.17: Religion Distribution Table
+
+```{r religion-table, eval="mat_religion" %in% names(unified)}
+rel_tbl <- unified %>%
+  mutate(mat_religion = ifelse(is.na(mat_religion)|trimws(as.character(mat_religion))=="", "Missing", as.character(mat_religion))) %>%
+  count(study_source, mat_religion, name="n") %>%
+  pivot_wider(names_from=study_source, values_from=n, values_fill=0) %>%
+  mutate(Total = rowSums(across(where(is.numeric)))) %>%
+  arrange(desc(Total))
+
+kable(rel_tbl, caption="v10.17: Religion Distribution by Study Source (Harmonised)") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE) %>%
+  row_spec(which(rel_tbl$mat_religion == "Missing"), italic=TRUE, color="#999")
+```
+
+## v10.17: Ethnicity (Top Categories)
+
+```{r ethnicity-distribution, fig.height=10, eval=has_ethnicity}
+eth_data <- unified %>%
+  filter(!is.na(mat_ethnicity), trimws(as.character(mat_ethnicity))!="") %>%
+  count(mat_ethnicity = as.character(mat_ethnicity), name="n") %>%
+  arrange(desc(n)) %>%
+  slice_head(n=30)
+
+ggplot(eth_data, aes(x=reorder(mat_ethnicity, n), y=n)) +
+  geom_col(fill="#3498DB", width=0.75) +
+  geom_text(aes(label=format(n, big.mark=",")), hjust=-0.05, size=3.5, fontface="bold") +
+  coord_flip() +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.2)), labels=comma) +
+  labs(title="v10.17: Top 30 Ethnic Groups",
+       subtitle=sprintf("N=%s records with ethnicity data (DHS labels decoded)",
+                        format(sum(!is.na(unified$mat_ethnicity)), big.mark=",")),
+       x=NULL, y="Number of Records")
+```
+
+```{r ethnicity-by-study, fig.height=7, eval=has_ethnicity}
+eth_study <- unified %>%
+  group_by(study_source) %>%
+  summarise(
+    N = n(),
+    N_ethnicity = sum(!is.na(mat_ethnicity)),
+    Pct_complete = round(N_ethnicity/N*100, 1),
+    N_unique = n_distinct(mat_ethnicity, na.rm=TRUE),
+    .groups="drop"
+  )
+
+kable(eth_study, col.names=c("Study","N Total","N with Ethnicity","% Complete","Unique Groups"),
+      caption="v10.17: Ethnicity Completeness by Study") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+```
+
+## v10.17: Birth Attendant
+
+```{r birth-attendant, fig.height=8, eval=has_birth_attendant}
+att_data <- unified %>%
+  mutate(attendant = ifelse(is.na(mat_birth_attendant)|trimws(as.character(mat_birth_attendant))=="",
+                            "Missing", as.character(mat_birth_attendant))) %>%
+  count(study_source, attendant, name="n") %>%
+  group_by(study_source) %>%
+  mutate(pct=n/sum(n)*100) %>%
+  ungroup()
+
+# Overall attendant distribution (non-missing only)
+att_overall <- unified %>%
+  filter(!is.na(mat_birth_attendant), trimws(as.character(mat_birth_attendant))!="") %>%
+  count(mat_birth_attendant = as.character(mat_birth_attendant), name="n") %>%
+  arrange(desc(n)) %>%
+  mutate(pct = n/sum(n)*100)
+
+ggplot(att_overall, aes(x=reorder(mat_birth_attendant, n), y=n, fill=n)) +
+  geom_col(show.legend=FALSE, width=0.75) +
+  geom_text(aes(label=sprintf("%s (%.1f%%)", format(n, big.mark=","), pct)),
+            hjust=-0.05, size=3.5, fontface="bold") +
+  coord_flip() +
+  scale_fill_gradient(low="#85C1E9", high="#2E86AB") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.3)), labels=comma) +
+  labs(title="v10.17: Birth Attendant Distribution",
+       subtitle=sprintf("N=%s records with attendant data (DHS m3a-m3n decoded)",
+                        format(sum(!is.na(unified$mat_birth_attendant)), big.mark=",")),
+       x=NULL, y="Number of Records")
+```
+
+```{r birth-attendant-by-study, fig.height=7, eval=has_birth_attendant}
+# By study - proportion stacked
+att_by_study <- unified %>%
+  filter(!is.na(mat_birth_attendant), trimws(as.character(mat_birth_attendant))!="") %>%
+  count(study_source, mat_birth_attendant = as.character(mat_birth_attendant), name="n") %>%
+  group_by(study_source) %>%
+  mutate(pct=n/sum(n)*100) %>%
+  ungroup()
+
+if (nrow(att_by_study) > 0) {
+  ggplot(att_by_study, aes(x=study_source, y=n, fill=mat_birth_attendant)) +
+    geom_col(position="fill", width=0.75) +
+    scale_fill_brewer(palette="Set3", name="Attendant") +
+    scale_y_continuous(labels=percent) +
+    labs(title="v10.17: Birth Attendant Type by Study",
+         subtitle="Among records with attendant data",
+         x=NULL, y="Proportion") +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+}
+```
+
+## Multiple Birth
+
+```{r multiple-birth, fig.height=6}
+if ("out_multiple" %in% names(unified)) {
+  mult_data <- unified %>%
+    mutate(out_multiple=ifelse(is.na(out_multiple)|trimws(as.character(out_multiple))=="","Missing",as.character(out_multiple))) %>%
+    count(study_source, out_multiple, name="n") %>%
+    group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+  ggplot(mult_data, aes(x=study_source, y=n, fill=out_multiple)) +
+    geom_col(position="fill", width=0.75) +
+    scale_fill_manual(values=c("Yes"="#E74C3C","No"="#27AE60","Singleton"="#27AE60",
+                                "Multiple"="#E74C3C","Missing"="#BDC3C7"), name="Multiple Birth") +
+    scale_y_continuous(labels=percent) +
+    labs(title="Multiple Birth Distribution by Study", x=NULL, y="Proportion") +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+}
+```
+
+# Data Completeness {.tabset}
+
+```{r completeness-setup}
+# Extended variable groups for v10.11+
+var_group_outcomes <- c("out_stillbirth","out_livebirth","out_fresh_stillbirth","out_macerated_stillbirth",
+  "out_stillbirth_20wks","out_stillbirth_28wks","out_nnd","out_nnd_early","out_nnd_late","out_perinatal_death",
+  "out_dob","out_dob_source","out_dod","out_ageatdeath",
+  "out_ga_weeks","out_ga_days","out_ga_method","out_preterm","out_very_preterm","out_extremely_preterm",
+  "out_birthweight_g","out_birthweight_centile","out_birthweight_zscore","out_lbw","out_vlbw","out_elbw",
+  "out_sga","out_lga","out_aga","out_sizeforGA","out_ga_string","out_infant_sex","out_apgar_1min","out_apgar_5min","out_apgar_10min","out_multiple")
+
+var_group_maternal <- c("mat_age","mat_age_cat","mat_country","mat_facility","mat_district","mat_urban_rural",
+  "mat_education","fat_education","mat_literacy","mat_occupation","fat_occupation","mat_marital_status","mat_religion","mat_ethnicity",
+  "mat_gravidity","mat_parity","mat_previous_cs","mat_previous_stillbirth","mat_previous_csection",
+  "mat_anc_visits","mat_anc_provider","mat_hiv_status","mat_syphilis",
+  "mat_height","mat_weight","mat_bmi","mat_muac","mat_sbp","mat_dbp","mat_hypertension","mat_hypertension_stage",
+  "mat_preeclampsia","mat_eclampsia","mat_aph","mat_diabetes","mat_malaria","mat_anaemia",
+  "mat_delivery_mode","mat_csection","mat_delivery_location","mat_birth_attendant","mat_prolonged_labour","mat_obstructed_labour","mat_prom")
+
+var_group_household <- c("hh_ppi_score","hh_ppi_band","hh_poverty_likelihood","hh_wealth_quintile","hh_ses_binary",
+  "hh_house_wall","hh_wall_material","hh_house_floor","hh_floor_material","hh_house_ownership","hh_ownership",
+  "hh_house_rooms","hh_num_rooms","hh_cooking_fuel","hh_heating_fuel","hh_lighting",
+  "hh_electricity","hh_water_source","hh_sanitation","hh_hygiene","hh_mosquito_net",
+  "hh_household_size","hh_size","hh_monthly_income","hh_asset_score")
+
+var_group_env <- c("env_latitude","env_longitude","env_elevation","env_slope",
+  "env_temp_mean_delivery","env_humidity_delivery","env_precipitation_delivery",
+  "env_heat_index_delivery","env_pm25_annual","env_pm25_delivery",
+  "env_season_delivery","env_season_conception","env_coord_source","coordinate_source")
+
+var_group_dates <- c("out_dob","out_dod","delivery_date_raw","conception_date","conception_date_source","study_date")
+
+var_group_ids <- c("unified_id","study_source","study_design","module","sample_weight","raw_id","raw_id_secondary","studyyear","study_id","dhs_survey_id","dhs_cluster","yob")
+
+plot_completeness_hm <- function(df, var_list, title_text) {
+  vars_present <- var_list[var_list %in% names(df)]
+  if (length(vars_present)==0) return(NULL)
+  comp <- df %>%
+    group_by(study_source) %>%
+    summarise(across(any_of(vars_present), ~round(mean(!is.na(.))*100,1)), .groups="drop") %>%
+    pivot_longer(-study_source, names_to="variable", values_to="pct_complete")
+  ggplot(comp, aes(x=study_source, y=variable, fill=pct_complete)) +
+    geom_tile(color="white", linewidth=0.5) +
+    geom_text(aes(label=sprintf("%.0f%%", pct_complete)), size=3, fontface="bold",
+              color=ifelse(comp$pct_complete>50, "white", "black")) +
+    scale_fill_gradientn(colors=c("#C0392B","#E74C3C","#F39C12","#F1C40F","#2ECC71","#27AE60"),
+      values=scales::rescale(c(0,20,40,60,80,100)), limits=c(0,100), name="% Complete") +
+    labs(title=title_text, x=NULL, y=NULL) +
+    theme_report() +
+    theme(axis.text.x=element_text(angle=45, hjust=1, face="bold"),
+          axis.text.y=element_text(size=9), panel.grid=element_blank())
+}
+```
+
+## Outcomes
+
+```{r completeness-outcomes, fig.height=12}
+plot_completeness_hm(unified, var_group_outcomes, "Completeness: Outcomes (v10.17)")
+```
+
+## Maternal
+
+```{r completeness-maternal, fig.height=12}
+plot_completeness_hm(unified, var_group_maternal, "Completeness: Maternal Variables (v10.17)")
+```
+
+## Household
+
+```{r completeness-household, fig.height=10}
+plot_completeness_hm(unified, var_group_household, "Completeness: Household/SES (v10.17)")
+```
+
+## Environmental
+
+```{r completeness-environmental, fig.height=8}
+plot_completeness_hm(unified, var_group_env, "Completeness: Environmental Variables (v10.17)")
+```
+
+## Summary
+
+```{r completeness-summary, fig.height=8}
+all_var_groups <- list(
+  "Section 1: Outcomes"=var_group_outcomes,
+  "Section 2: Maternal"=var_group_maternal,
+  "Section 3: Household/SES"=var_group_household,
+  "Section 4: Environmental"=var_group_env,
+  "Dates"=var_group_dates,
+  "Identifiers"=var_group_ids
+)
+remaining <- setdiff(names(unified), unlist(all_var_groups))
+if (length(remaining)>0) all_var_groups[["Other"]] <- remaining
+
+group_completeness <- map_dfr(names(all_var_groups), function(grp) {
+  vars <- all_var_groups[[grp]]; vars <- vars[vars %in% names(unified)]
+  if (length(vars)==0) return(NULL)
+  unified %>%
+    summarise(across(all_of(vars), ~mean(!is.na(.))*100)) %>%
+    pivot_longer(everything(), names_to="variable", values_to="pct") %>%
+    mutate(group=grp)
+})
+
+group_summary <- group_completeness %>%
+  group_by(group) %>%
+  summarise(mean_pct=mean(pct), min_pct=min(pct), max_pct=max(pct), n_vars=n(), .groups="drop") %>%
+  arrange(desc(mean_pct))
+
+ggplot(group_summary, aes(x=reorder(group, mean_pct), y=mean_pct, fill=group)) +
+  geom_col(width=0.7, show.legend=FALSE) +
+  geom_errorbar(aes(ymin=min_pct, ymax=max_pct), width=0.25) +
+  geom_text(aes(label=sprintf("%.1f%%\n(%d vars)", mean_pct, n_vars)),
+            hjust=-0.1, size=4, fontface="bold") +
+  coord_flip() + scale_fill_brewer(palette="Set2") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.25)), limits=c(0, 100)) +
+  labs(title="Data Completeness by Variable Group",
+       subtitle="v10.17 Extended Schema | Mean completeness with min-max range",
+       x=NULL, y="Mean Completeness (%)")
+```
+
+# v10.17: Environmental Data {.tabset}
+
+## Environmental Completeness
+
+```{r env-completeness, fig.height=7, eval=has_env_vars}
+env_vars <- c("env_latitude","env_longitude","env_elevation","env_slope",
+              "env_temp_mean_delivery","env_humidity_delivery","env_precipitation_delivery",
+              "env_heat_index_delivery","env_pm25_annual","env_pm25_delivery",
+              "env_season_delivery","env_season_conception","env_coord_source")
+env_vars_present <- env_vars[env_vars %in% names(unified)]
+
+env_comp <- tibble(
+  Variable = env_vars_present,
+  N_NonMissing = sapply(env_vars_present, function(v) sum(!is.na(unified[[v]]))),
+  Pct_Complete = sapply(env_vars_present, function(v) round(mean(!is.na(unified[[v]]))*100, 1))
+) %>% arrange(desc(Pct_Complete))
+
+ggplot(env_comp, aes(x=reorder(Variable, Pct_Complete), y=Pct_Complete, fill=Pct_Complete)) +
+  geom_col(width=0.7, show.legend=FALSE) +
+  geom_text(aes(label=sprintf("%.1f%%\n(n=%s)", Pct_Complete, format(N_NonMissing, big.mark=","))),
+            hjust=-0.05, size=3.5, fontface="bold") +
+  coord_flip() +
+  scale_fill_gradientn(colors=c("#C0392B","#F39C12","#27AE60"), values=c(0,0.5,1), limits=c(0,100)) +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.3)), limits=c(0, 100)) +
+  labs(title="v10.17: Environmental Variable Completeness",
+       subtitle=sprintf("Extracted at %s unique GPS coordinates (v3.4)",
+                        format(n_distinct(paste(unified$env_latitude, unified$env_longitude), na.rm=TRUE), big.mark=",")),
+       x=NULL, y="% Complete")
+```
+
+## Temperature Distribution
+
+```{r env-temperature, fig.height=8, eval=has_env_vars}
+if ("env_temp_mean_delivery" %in% names(unified)) {
+  temp_data <- unified %>% filter(!is.na(env_temp_mean_delivery))
+
+  ggplot(temp_data, aes(x=env_temp_mean_delivery, fill=study_source)) +
+    geom_histogram(binwidth=1, color="white", alpha=0.8, show.legend=FALSE) +
+    facet_wrap(~study_source, scales="free_y", ncol=2) +
+    scale_fill_manual(values=COLORS$studies) +
+    labs(title="v10.17: Mean Temperature at Delivery Month by Study",
+         subtitle=sprintf("N=%s records | ERA5 2m temperature (0.25-degree grid)",
+                          format(nrow(temp_data), big.mark=",")),
+         x="Temperature (Celsius)", y="Count")
+}
+```
+
+## Elevation Distribution
+
+```{r env-elevation, fig.height=8, eval=has_env_vars}
+if ("env_elevation" %in% names(unified)) {
+  elev_data <- unified %>% filter(!is.na(env_elevation), env_elevation > -500, env_elevation < 5000)
+
+  ggplot(elev_data, aes(x=env_elevation, fill=study_source)) +
+    geom_histogram(binwidth=100, color="white", alpha=0.8, show.legend=FALSE) +
+    facet_wrap(~study_source, scales="free_y", ncol=2) +
+    scale_fill_manual(values=COLORS$studies) +
+    labs(title="v10.17: Elevation Distribution by Study",
+         subtitle=sprintf("N=%s records | SRTM 30-arc-second DEM",
+                          format(nrow(elev_data), big.mark=",")),
+         x="Elevation (meters)", y="Count")
+}
+```
+
+## PM2.5 Distribution
+
+```{r env-pm25, fig.height=8, eval=has_env_vars}
+if ("env_pm25_annual" %in% names(unified)) {
+  pm_data <- unified %>% filter(!is.na(env_pm25_annual), env_pm25_annual > 0)
+
+  ggplot(pm_data, aes(x=env_pm25_annual, fill=study_source)) +
+    geom_histogram(binwidth=5, color="white", alpha=0.8, show.legend=FALSE) +
+    geom_vline(xintercept=15, linetype="dashed", color="#F39C12", linewidth=0.8) +
+    geom_vline(xintercept=35, linetype="dashed", color="#E74C3C", linewidth=0.8) +
+    facet_wrap(~study_source, scales="free_y", ncol=2) +
+    scale_fill_manual(values=COLORS$studies) +
+    labs(title="v10.17: Annual PM2.5 Distribution by Study",
+         subtitle=sprintf("N=%s records | WHO guideline=15 ug/m3 (orange), Interim=35 (red)",
+                          format(nrow(pm_data), big.mark=",")),
+         x="PM2.5 (ug/m3)", y="Count")
+}
+```
+
+## Season Distribution
+
+```{r env-season, fig.height=7, eval=has_env_season}
+season_data <- unified %>%
+  mutate(
+    season_del = ifelse(is.na(env_season_delivery)|trimws(as.character(env_season_delivery))=="",
+                        "Missing", as.character(env_season_delivery)),
+    season_con = ifelse(is.na(env_season_conception)|trimws(as.character(env_season_conception))=="",
+                        "Missing", as.character(env_season_conception))
+  )
+
+season_del_counts <- season_data %>%
+  count(study_source, season_del, name="n") %>%
+  group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+
+ggplot(season_del_counts, aes(x=study_source, y=n, fill=season_del)) +
+  geom_col(position="fill", width=0.75) +
+  scale_fill_manual(values=c("Wet"="#3498DB","Dry"="#E67E22","Missing"="#BDC3C7"), name="Season") +
+  scale_y_continuous(labels=percent) +
+  labs(title="v10.17: Season at Delivery by Study",
+       subtitle="Hemisphere-based classification (Northern: Wet=Apr-Sep; Southern: Wet=Oct-Mar)",
+       x=NULL, y="Proportion") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Coordinate Source
+
+```{r env-coord-source, fig.height=7, eval="env_coord_source" %in% names(unified) | "coordinate_source" %in% names(unified)}
+coord_var <- if ("env_coord_source" %in% names(unified)) "env_coord_source" else "coordinate_source"
+
+coord_data <- unified %>%
+  mutate(coord_src = ifelse(is.na(.data[[coord_var]])|trimws(as.character(.data[[coord_var]]))=="",
+                            "Missing", as.character(.data[[coord_var]]))) %>%
+  count(study_source, coord_src, name="n") %>%
+  group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+
+ggplot(coord_data, aes(x=study_source, y=n, fill=coord_src)) +
+  geom_col(position="fill", width=0.75) +
+  scale_fill_brewer(palette="Set2", name="Coordinate Source") +
+  scale_y_continuous(labels=percent) +
+  labs(title="v10.17: GPS Coordinate Source by Study",
+       subtitle="How GPS coordinates were obtained for environmental linkage",
+       x=NULL, y="Proportion") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Environmental Summary Table
+
+```{r env-summary-table, eval=has_env_vars}
+env_num_vars <- c("env_elevation","env_slope","env_temp_mean_delivery",
+                  "env_humidity_delivery","env_precipitation_delivery",
+                  "env_heat_index_delivery","env_pm25_annual")
+env_num_present <- env_num_vars[env_num_vars %in% names(unified)]
+
+env_summary <- tibble(
+  Variable = env_num_present,
+  N = sapply(env_num_present, function(v) sum(!is.na(unified[[v]]))),
+  Pct_Complete = sapply(env_num_present, function(v) round(mean(!is.na(unified[[v]]))*100,1)),
+  Min = sapply(env_num_present, function(v) round(min(unified[[v]], na.rm=TRUE), 1)),
+  Mean = sapply(env_num_present, function(v) round(mean(unified[[v]], na.rm=TRUE), 1)),
+  Median = sapply(env_num_present, function(v) round(median(unified[[v]], na.rm=TRUE), 1)),
+  Max = sapply(env_num_present, function(v) round(max(unified[[v]], na.rm=TRUE), 1))
+)
+
+kable(env_summary,
+      col.names=c("Variable","N","% Complete","Min","Mean","Median","Max"),
+      caption="v10.17: Environmental Variable Summary Statistics") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+```
+
+# Cross-Tabulations {.tabset}
+
+## SB by Maternal Age
+
+```{r sb-by-age, fig.height=6}
+sb_age <- unified %>%
+  filter(!is.na(mat_age)) %>%
+  mutate(age_group=case_when(
+    mat_age<18~"<18", mat_age<25~"18-24", mat_age<30~"25-29",
+    mat_age<35~"30-34", mat_age<40~"35-39", TRUE~"40+")) %>%
+  group_by(age_group) %>%
+  summarise(n_sb=sum(out_stillbirth=="Yes", na.rm=TRUE),
+            n_lb=sum(out_livebirth=="Yes", na.rm=TRUE),
+            n_tb=n_sb+n_lb,
+            rate=ifelse(n_tb>0, n_sb/n_tb*1000, NA_real_), .groups="drop")
+
+sb_age$age_group <- factor(sb_age$age_group, levels=c("<18","18-24","25-29","30-34","35-39","40+"))
+
+ggplot(sb_age, aes(x=age_group, y=rate, fill=rate)) +
+  geom_col(width=0.7) +
+  geom_text(aes(label=sprintf("%.1f\n(n=%d/%d)", rate, n_sb, n_tb)),
+            vjust=-0.3, size=3.5, fontface="bold") +
+  scale_fill_gradient(low="#F1C40F", high="#C0392B", guide="none") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.2))) +
+  labs(title="Stillbirth Rate by Maternal Age Group",
+       subtitle="SBR = SB / (SB+LB) x 1,000 | Labels: rate (n=SB/TotalBirths)",
+       x="Maternal Age Group", y="Stillbirth Rate (per 1,000)")
+```
+
+## SB by GA Category
+
+```{r sb-by-ga, fig.height=6}
+sb_ga <- unified %>%
+  filter(!is.na(out_ga_weeks)) %>%
+  mutate(ga_cat=case_when(
+    out_ga_weeks<28~"Extremely preterm (<28)", out_ga_weeks<32~"Very preterm (28-31)",
+    out_ga_weeks<37~"Moderate/Late preterm (32-36)", out_ga_weeks<42~"Term (37-41)",
+    TRUE~"Post-term (42+)")) %>%
+  group_by(ga_cat) %>%
+  summarise(n_sb=sum(out_stillbirth=="Yes", na.rm=TRUE),
+            n_lb=sum(out_livebirth=="Yes", na.rm=TRUE),
+            n_tb=n_sb+n_lb,
+            rate=ifelse(n_tb>0, n_sb/n_tb*1000, NA_real_), .groups="drop")
+
+sb_ga$ga_cat <- factor(sb_ga$ga_cat,
+  levels=c("Extremely preterm (<28)","Very preterm (28-31)",
+           "Moderate/Late preterm (32-36)","Term (37-41)","Post-term (42+)"))
+
+ggplot(sb_ga, aes(x=ga_cat, y=rate, fill=rate)) +
+  geom_col(width=0.7) +
+  geom_text(aes(label=sprintf("%.1f\n(n=%d/%d)", rate, n_sb, n_tb)),
+            vjust=-0.3, size=3.5, fontface="bold") +
+  scale_fill_gradient(low="#27AE60", high="#C0392B", guide="none") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.2))) +
+  labs(title="Stillbirth Rate by Gestational Age Category",
+       subtitle="SBR = SB / Total Births x 1,000",
+       x="Gestational Age Category", y="Stillbirth Rate (per 1,000)") +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+```
+
+## NND by Birthweight
+
+```{r nnd-by-bw, fig.height=6}
+nnd_bw <- unified %>%
+  filter(out_livebirth=="Yes", !is.na(out_nnd), !is.na(out_birthweight_g)) %>%
+  mutate(bw_cat=case_when(
+    out_birthweight_g<1000~"ELBW (<1000g)", out_birthweight_g<1500~"VLBW (1000-1499g)",
+    out_birthweight_g<2500~"LBW (1500-2499g)", out_birthweight_g<4000~"Normal (2500-3999g)",
+    TRUE~"Macrosomia (4000+g)")) %>%
+  group_by(bw_cat) %>%
+  summarise(n=n(), n_nnd=sum(out_nnd=="Yes"), rate=n_nnd/n*1000, .groups="drop")
+
+nnd_bw$bw_cat <- factor(nnd_bw$bw_cat,
+  levels=c("ELBW (<1000g)","VLBW (1000-1499g)","LBW (1500-2499g)","Normal (2500-3999g)","Macrosomia (4000+g)"))
+
+ggplot(nnd_bw, aes(x=bw_cat, y=rate, fill=rate)) +
+  geom_col(width=0.7) +
+  geom_text(aes(label=sprintf("%.1f\n(n=%s/%s)", rate, format(n_nnd,big.mark=","), format(n,big.mark=","))),
+            vjust=-0.3, size=3.5, fontface="bold") +
+  scale_fill_gradient(low="#27AE60", high="#8E44AD", guide="none") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.2))) +
+  labs(title="NND Rate by Birthweight Category",
+       subtitle="NND/Live Births x 1,000 in each category",
+       x="Birthweight Category", y="NND Rate (per 1,000 live births)") +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+```
+
+## Outcomes by Education
+
+```{r outcomes-by-education, fig.height=7}
+if ("mat_education" %in% names(unified)) {
+  edu_out <- unified %>%
+    filter(!is.na(mat_education), trimws(as.character(mat_education))!="") %>%
+    group_by(mat_education) %>%
+    summarise(n=n(), n_sb=sum(out_stillbirth=="Yes", na.rm=TRUE),
+              n_lb=sum(out_livebirth=="Yes", na.rm=TRUE),
+              n_nnd=sum(out_nnd=="Yes", na.rm=TRUE),
+              n_tb=n_sb+n_lb,
+              SBR=ifelse(n_tb>0, n_sb/n_tb*1000, NA_real_),
+              NND_Rate=ifelse(n_lb>0, n_nnd/n_lb*1000, NA_real_), .groups="drop") %>%
+    filter(n>=20)
+  edu_long <- edu_out %>% select(mat_education, SBR, NND_Rate) %>%
+    pivot_longer(c(SBR, NND_Rate), names_to="Outcome", values_to="Rate")
+  ggplot(edu_long, aes(x=mat_education, y=Rate, fill=Outcome)) +
+    geom_col(position=position_dodge(width=0.8), width=0.7) +
+    geom_text(aes(label=sprintf("%.1f", Rate)),
+              position=position_dodge(width=0.8), vjust=-0.5, size=3.5, fontface="bold") +
+    scale_fill_manual(values=c("SBR"="#C0392B","NND_Rate"="#8E44AD"),
+                      labels=c("SBR"="Stillbirth Rate","NND_Rate"="NND Rate"), name="Outcome") +
+    scale_y_continuous(expand=expansion(mult=c(0, 0.15))) +
+    labs(title="Mortality Rates by Education",
+         subtitle="SBR/1000 total births; NND/1000 live births",
+         x="Education Level", y="Rate per 1,000") +
+    theme(axis.text.x=element_text(angle=30, hjust=1))
+}
+```
+
+## ★ Outcomes by Hypertension (v10.11+)
+
+```{r outcomes-by-hypertension, fig.height=7, eval=has_hypertension_stage}
+hyp_outcomes <- unified %>% filter(!is.na(mat_hypertension_stage), mat_hypertension_stage != "Missing") %>% group_by(mat_hypertension_stage) %>%
+  summarise(n=n(), n_sb=sum(out_stillbirth=="Yes", na.rm=TRUE), n_lb=sum(out_livebirth=="Yes", na.rm=TRUE),
+    n_nnd=sum(out_nnd=="Yes", na.rm=TRUE), n_tb=n_sb+n_lb,
+    SBR=ifelse(n_tb>0, round(n_sb/n_tb*1000, 1), NA_real_), NND_Rate=ifelse(n_lb>0, round(n_nnd/n_lb*1000, 1), NA_real_), .groups="drop") %>%
+  filter(n >= 20)
+hyp_long <- hyp_outcomes %>% select(mat_hypertension_stage, SBR, NND_Rate) %>% pivot_longer(c(SBR, NND_Rate), names_to="Outcome", values_to="Rate")
+ggplot(hyp_long, aes(x=mat_hypertension_stage, y=Rate, fill=Outcome)) +
+  geom_col(position=position_dodge(width=0.8), width=0.7) +
+  geom_text(aes(label=sprintf("%.1f", Rate)), position=position_dodge(width=0.8), vjust=-0.5, size=3.5, fontface="bold") +
+  scale_fill_manual(values=c("SBR"="#C0392B","NND_Rate"="#8E44AD"), labels=c("SBR"="Stillbirth Rate","NND_Rate"="NND Rate"), name="Outcome") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.15))) +
+  labs(title="★ v10.11+: Mortality Rates by Hypertension Stage", x="Hypertension Stage", y="Rate per 1,000") +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+```
+
+## ★ Outcomes by SGA (v10.11+)
+
+```{r outcomes-by-sga, fig.height=7, eval=has_sizeforGA}
+sga_outcomes <- unified %>% filter(!is.na(out_sizeforGA)) %>% group_by(out_sizeforGA) %>%
+  summarise(n=n(), n_sb=sum(out_stillbirth=="Yes", na.rm=TRUE), n_lb=sum(out_livebirth=="Yes", na.rm=TRUE),
+    n_nnd=sum(out_nnd=="Yes", na.rm=TRUE), n_tb=n_sb+n_lb,
+    SBR=ifelse(n_tb>0, round(n_sb/n_tb*1000, 1), NA_real_), NND_Rate=ifelse(n_lb>0, round(n_nnd/n_lb*1000, 1), NA_real_), .groups="drop") %>%
+  filter(n >= 20)
+sga_long <- sga_outcomes %>% select(out_sizeforGA, SBR, NND_Rate) %>% pivot_longer(c(SBR, NND_Rate), names_to="Outcome", values_to="Rate")
+ggplot(sga_long, aes(x=out_sizeforGA, y=Rate, fill=Outcome)) +
+  geom_col(position=position_dodge(width=0.8), width=0.7) +
+  geom_text(aes(label=sprintf("%.1f", Rate)), position=position_dodge(width=0.8), vjust=-0.5, size=3.5, fontface="bold") +
+  scale_fill_manual(values=c("SBR"="#C0392B","NND_Rate"="#8E44AD"), labels=c("SBR"="Stillbirth Rate","NND_Rate"="NND Rate"), name="Outcome") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.15))) +
+  labs(title="★ v10.11+: Mortality Rates by Size for Gestational Age", x="Size for GA", y="Rate per 1,000") +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+```
+
+## ★ Outcomes by GA Method (v10.13)
+
+```{r outcomes-by-ga-method, fig.height=7, eval=has_ga_method}
+ga_method_outcomes <- unified %>%
+  filter(!is.na(out_ga_method), trimws(as.character(out_ga_method))!="") %>%
+  group_by(out_ga_method) %>%
+  summarise(
+    n=n(),
+    n_sb=sum(out_stillbirth=="Yes", na.rm=TRUE),
+    n_lb=sum(out_livebirth=="Yes", na.rm=TRUE),
+    n_nnd=sum(out_nnd=="Yes", na.rm=TRUE),
+    n_tb=n_sb+n_lb,
+    SBR=ifelse(n_tb>0, round(n_sb/n_tb*1000, 1), NA_real_),
+    NND_Rate=ifelse(n_lb>0, round(n_nnd/n_lb*1000, 1), NA_real_),
+    Preterm_pct=round(mean(out_preterm=="Yes", na.rm=TRUE)*100, 1),
+    Mean_GA=round(mean(out_ga_weeks, na.rm=TRUE), 1),
+    Mean_BW=round(mean(out_birthweight_g, na.rm=TRUE), 0),
+    .groups="drop"
+  ) %>%
+  filter(n >= 20)
+
+kable(ga_method_outcomes %>%
+        transmute(`GA Method`=out_ga_method, N=format(n, big.mark=","),
+                  `SBR(/1000)`=SBR, `NND Rate(/1000)`=NND_Rate,
+                  `Preterm%`=Preterm_pct, `Mean GA`=Mean_GA, `Mean BW`=format(Mean_BW, big.mark=",")),
+      caption="★ v10.13: Outcomes by GA Measurement Method") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+
+ga_method_long <- ga_method_outcomes %>%
+  select(out_ga_method, SBR, NND_Rate) %>%
+  pivot_longer(c(SBR, NND_Rate), names_to="Outcome", values_to="Rate")
+
+ggplot(ga_method_long, aes(x=out_ga_method, y=Rate, fill=Outcome)) +
+  geom_col(position=position_dodge(width=0.8), width=0.7) +
+  geom_text(aes(label=sprintf("%.1f", Rate)),
+            position=position_dodge(width=0.8), vjust=-0.5, size=3.5, fontface="bold") +
+  scale_fill_manual(values=c("SBR"="#C0392B","NND_Rate"="#8E44AD"),
+                    labels=c("SBR"="Stillbirth Rate","NND_Rate"="NND Rate"), name="Outcome") +
+  scale_y_continuous(expand=expansion(mult=c(0, 0.15))) +
+  labs(title="★ v10.13: Mortality Rates by GA Measurement Method",
+       subtitle="SBR/1000 total births; NND/1000 live births",
+       x="GA Measurement Method", y="Rate per 1,000") +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+```
+
+# Summary Tables {.tabset}
+
+## Mortality Rates
+
+```{r mortality-table}
+mort_tbl <- exec_table %>%
+  transmute(Study=study_source,
+            N=format(N, big.mark=","),
+            `LB`=format(n_lb, big.mark=","),
+            `SB`=format(n_sb, big.mark=","),
+            `NND`=format(n_nnd, big.mark=","),
+            `TB`=format(n_tb, big.mark=","),
+            `SBR(/1000)`=SBR, `NND Rate(/1000)`=NND_Rate, `PMR(/1000)`=PMR)
+
+kable(mort_tbl, caption="Mortality Rates (SBR=SB/TB; NND=NND/LB; PMR=(SB+NND)/TB)") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE) %>%
+  row_spec(nrow(mort_tbl), bold=TRUE, background="#ECF0F1")
+```
+
+## Outcome Counts
+
+```{r outcome-counts}
+outcome_counts <- tibble(
+  Outcome=c("Total Records","Live Births","Stillbirths","Neonatal Deaths",
+            "Perinatal Deaths","Preterm Births","Low Birthweight"),
+  Count=c(nrow(unified),
+          sum(unified$out_livebirth=="Yes", na.rm=TRUE),
+          sum(unified$out_stillbirth=="Yes", na.rm=TRUE),
+          sum(unified$out_nnd=="Yes", na.rm=TRUE),
+          sum(unified$out_perinatal_death=="Yes", na.rm=TRUE),
+          sum(unified$out_preterm=="Yes", na.rm=TRUE),
+          sum(unified$out_lbw=="Yes", na.rm=TRUE))) %>%
+  mutate(Count_Fmt=format(Count, big.mark=","),
+         Pct=sprintf("%.2f%%", Count/nrow(unified)*100))
+
+kable(outcome_counts %>% select(Outcome, Count_Fmt, Pct),
+      col.names=c("Outcome","Count","% of Total"),
+      caption="Outcome Summary") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+```
+
+## Variable Inventory
+
+```{r variable-inventory-simple}
+var_inv <- tibble(
+  Variable=names(unified),
+  Type=sapply(unified, function(x) class(x)[1]),
+  N_NonMissing=sapply(unified, function(x) sum(!is.na(x))),
+  Pct_Complete=sapply(unified, function(x) round(mean(!is.na(x))*100, 1)),
+  N_Unique=sapply(unified, function(x) n_distinct(x, na.rm=TRUE)),
+  Section=case_when(
+    Variable %in% var_group_outcomes ~ "1: Outcomes",
+    Variable %in% var_group_maternal ~ "2: Maternal",
+    Variable %in% var_group_household ~ "3: Household/SES",
+    Variable %in% var_group_env ~ "4: Environmental",
+    Variable %in% var_group_dates ~ "5: Dates",
+    Variable %in% var_group_ids ~ "Identifiers",
+    TRUE ~ "Other"
+  )
+) %>% arrange(Section, desc(Pct_Complete))
+
+kable(var_inv %>% select(Section, Variable, Type, N_NonMissing, Pct_Complete, N_Unique),
+      col.names=c("Section","Variable","Type","N (non-missing)","% Complete","Unique"),
+      caption="Complete Variable Inventory (v10.17 Schema)") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE, font_size=10) %>%
+  collapse_rows(columns=1, valign="top")
+```
+
+## Variable Inventory by Study
+
+```{r variable-inventory-by-study}
+# Build per-study completeness for each variable
+studies <- sort(unique(unified$study_source))
+
+var_inv_study <- tibble(Variable = names(unified)) %>%
+  mutate(
+    Type = sapply(Variable, function(v) class(unified[[v]])[1]),
+    Section = case_when(
+      Variable %in% var_group_outcomes ~ "1: Outcomes",
+      Variable %in% var_group_maternal ~ "2: Maternal",
+      Variable %in% var_group_household ~ "3: Household/SES",
+      Variable %in% var_group_env ~ "4: Environmental",
+      Variable %in% var_group_dates ~ "5: Dates",
+      Variable %in% var_group_ids ~ "Identifiers",
+      TRUE ~ "Other"
+    ),
+    N_NonMissing = sapply(Variable, function(v) sum(!is.na(unified[[v]]))),
+    Pct_Complete = sapply(Variable, function(v) round(mean(!is.na(unified[[v]])) * 100, 1)),
+    N_Unique = sapply(Variable, function(v) n_distinct(unified[[v]], na.rm=TRUE))
+  )
+
+# Add per-study completeness columns
+for (s in studies) {
+  sub <- unified %>% filter(study_source == s)
+  var_inv_study[[s]] <- sapply(var_inv_study$Variable, function(v) {
+    if (v %in% names(sub)) round(mean(!is.na(sub[[v]])) * 100, 1) else NA_real_
+  })
+}
+
+var_inv_study <- var_inv_study %>% arrange(Section, desc(Pct_Complete))
+
+# Helper: colour a percentage value
+fmt_pct <- function(val) {
+  if (is.na(val)) return(cell_spec("—", "html", color="#999999", background="#f0f0f0"))
+  bg <- if (val == 0) "#f8d7da" else if (val < 50) "#fff3cd" else if (val < 80) "#d4edda" else "#c3e6cb"
+  fg <- if (val == 0) "#721c24" else if (val < 50) "#856404" else "black"
+  cell_spec(val, "html", color=fg, background=bg, bold=(val==100))
+}
+
+# Pre-format the display table
+display_df <- var_inv_study %>%
+  mutate(
+    Pct_fmt = sapply(Pct_Complete, fmt_pct)
+  )
+
+# Format each study column
+for (s in studies) {
+  display_df[[paste0(s, "_fmt")]] <- sapply(display_df[[s]], fmt_pct)
+}
+
+# Select formatted columns for output
+fmt_study_cols <- paste0(studies, "_fmt")
+
+final_df <- display_df %>%
+  select(Section, Variable, Type, N_NonMissing, Pct_fmt, N_Unique, all_of(fmt_study_cols))
+
+col_names <- c("Section", "Variable", "Type", "N (all)", "% (all)", "Unique", paste0("% ", studies))
+
+kable(final_df, format="html", escape=FALSE, col.names=col_names,
+      caption="Variable Inventory by Study Source (% Complete)") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=TRUE, font_size=9) %>%
+  add_header_above(c(" "=3, "Overall"=3, "% Complete by Study"=length(studies)))
+```
+
+## Export Variable Inventory to Excel
+
+```{r export-variable-inventory, message=FALSE, warning=FALSE}
+library(openxlsx)
+
+# Use the unformatted var_inv_study (not the cell_spec version)
+export_df <- var_inv_study %>%
+  select(Section, Variable, Type, N_NonMissing, Pct_Complete, N_Unique, all_of(studies))
+
+names(export_df) <- c("Section", "Variable", "Type", "N (all)", "% (all)", 
+                       "Unique", paste0("% ", studies))
+
+wb <- createWorkbook()
+addWorksheet(wb, "Variable Inventory")
+writeData(wb, 1, export_df, 
+          headerStyle = createStyle(textDecoration = "bold", 
+                                    fgFill = "#4472C4", 
+                                    fontColour = "white"))
+
+# Freeze top row and first 2 columns
+freezePane(wb, 1, firstActiveRow = 2, firstActiveCol = 3)
+
+# Auto-width columns
+setColWidths(wb, 1, cols = 1:ncol(export_df), widths = "auto")
+
+# Conditional formatting on % columns (col 5 = overall, then study columns)
+pct_cols <- c(5, 7:ncol(export_df))
+n_rows <- nrow(export_df)
+
+for (col in pct_cols) {
+  conditionalFormatting(wb, 1, cols = col, rows = 2:(n_rows + 1),
+    type = "expression", rule = "==0",
+    style = createStyle(bgFill = "#f8d7da", fontColour = "#721c24"))
+  conditionalFormatting(wb, 1, cols = col, rows = 2:(n_rows + 1),
+    type = "expression", rule = "<50",
+    style = createStyle(bgFill = "#fff3cd", fontColour = "#856404"))
+  conditionalFormatting(wb, 1, cols = col, rows = 2:(n_rows + 1),
+    type = "expression", rule = "<80",
+    style = createStyle(bgFill = "#d4edda"))
+  conditionalFormatting(wb, 1, cols = col, rows = 2:(n_rows + 1),
+    type = "expression", rule = ">=80",
+    style = createStyle(bgFill = "#c3e6cb"))
+}
+
+# Add borders
+addStyle(wb, 1, 
+         style = createStyle(border = "TopBottomLeftRight", borderColour = "#cccccc"),
+         rows = 1:(n_rows + 1), cols = 1:ncol(export_df), 
+         gridExpand = TRUE, stack = TRUE)
+
+saveWorkbook(wb, "output/variable_inventory_by_study.xlsx", overwrite = TRUE)
+cat("✅ Exported to: output/variable_inventory_by_study.xlsx\n")
+```
+
+# PowerPoint Export
+
+```{r pptx-export, echo=TRUE, results='hide'}
+cat("\n====================================================================\n")
+cat("              GENERATING POWERPOINT PRESENTATION\n")
+cat("====================================================================\n\n")
+
+PPTX_PATH <- file.path("output", sprintf("unified_analysis_v%s.pptx", VERSION))
+ppt <- read_pptx()
+
+add_plot_slide <- function(ppt, plot_obj, title) {
+  ppt <- add_slide(ppt, layout="Title and Content", master="Office Theme")
+  ppt <- ph_with(ppt, value=title, location=ph_location_type(type="title"))
+  ppt <- ph_with(ppt, value=dml(ggobj=plot_obj), location=ph_location_type(type="body"))
+  return(ppt)
+}
+add_title_slide <- function(ppt, title, subtitle) {
+  ppt <- add_slide(ppt, layout="Title Slide", master="Office Theme")
+  ppt <- ph_with(ppt, value=title, location=ph_location_type(type="ctrTitle"))
+  ppt <- ph_with(ppt, value=subtitle, location=ph_location_type(type="subTitle"))
+  return(ppt)
+}
+
+overall <- exec_table %>% filter(study_source=="OVERALL")
+
+ppt <- add_title_slide(ppt,
+  "Unified Perinatal Dataset Analysis",
+  sprintf("Stillbirth & Neonatal Death Prediction\nJoseph Akuze (LSHTM) | %s | N=%s",
+          format(Sys.Date(), "%B %d, %Y"), format(nrow(unified), big.mark=",")))
+
+# Study distribution
+ppt <- add_plot_slide(ppt,
+  ggplot(study_dist, aes(x=reorder(study_source,n), y=n, fill=study_source)) +
+    geom_col(width=0.75, show.legend=FALSE) +
+    geom_text(aes(label=sprintf("%s (%.1f%%)", format(n,big.mark=","), pct)),
+              hjust=-0.05, size=4, fontface="bold") +
+    coord_flip() + scale_fill_manual(values=COLORS$studies) +
+    scale_y_continuous(expand=expansion(mult=c(0, 0.3)), labels=comma) +
+    labs(title="Records by Study", x=NULL, y="N") + theme_report(),
+  "Records by Study")
+
+# Country
+ppt <- add_plot_slide(ppt,
+  ggplot(country_dist, aes(x=reorder(mat_country, total), y=n, fill=study_source)) +
+    geom_col(width=0.8) + coord_flip() +
+    scale_fill_manual(values=COLORS$studies, name="Study") +
+    scale_y_continuous(expand=expansion(mult=c(0,0.1)), labels=comma) +
+    labs(title=sprintf("All Countries (N=%d)", n_countries), x=NULL, y="Records") +
+    theme_report() + theme(legend.position="right"),
+  "Geographic Distribution")
+
+# ★ v10.13: Study Design & Module slides
+if (has_study_design) {
+  design_ppt <- unified %>%
+    mutate(study_design = ifelse(is.na(study_design)|trimws(as.character(study_design))=="", "Missing", as.character(study_design))) %>%
+    count(study_source, study_design, name="n") %>%
+    group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+  ppt <- add_plot_slide(ppt,
+    ggplot(design_ppt, aes(x=study_source, y=n, fill=study_design)) +
+      geom_col(position="fill", width=0.75) +
+      scale_fill_manual(values=COLORS$study_design, name="Study Design") +
+      scale_y_continuous(labels=percent) +
+      labs(title="Study Design by Source", x=NULL, y="Proportion") +
+      theme_report() + theme(axis.text.x=element_text(angle=45, hjust=1)),
+    "Study Design Distribution")
+}
+
+if (has_ga_method) {
+  gam_ppt <- unified %>%
+    mutate(out_ga_method = ifelse(is.na(out_ga_method)|trimws(as.character(out_ga_method))=="", "Missing", as.character(out_ga_method))) %>%
+    count(study_source, out_ga_method, name="n") %>%
+    group_by(study_source) %>% mutate(pct=n/sum(n)*100) %>% ungroup()
+  ppt <- add_plot_slide(ppt,
+    ggplot(gam_ppt, aes(x=study_source, y=n, fill=out_ga_method)) +
+      geom_col(position="fill", width=0.75) +
+      scale_fill_manual(values=COLORS$ga_method, name="GA Method") +
+      scale_y_continuous(labels=percent) +
+      labs(title="GA Measurement Method by Study", x=NULL, y="Proportion") +
+      theme_report() + theme(axis.text.x=element_text(angle=45, hjust=1)),
+    "GA Method Distribution")
+}
+
+# SB
+ppt <- add_title_slide(ppt, "Stillbirth Analysis", "Rates and Risk Factors")
+ppt <- add_plot_slide(ppt,
+  ggplot(sb_by_study, aes(x=reorder(study_source,rate), y=rate)) +
+    geom_col(fill=COLORS$outcomes["Stillbirth"], width=0.7, alpha=0.9) +
+    geom_errorbar(aes(ymin=ci_low, ymax=ci_high), width=0.25) +
+    geom_text(aes(label=sprintf("%.1f", rate)), hjust=-0.2, size=4.5, fontface="bold") +
+    coord_flip() + scale_y_continuous(expand=expansion(mult=c(0, 0.2))) +
+    labs(title="Stillbirth Rate by Study", subtitle="SB/TB x1000", x=NULL, y="Rate/1000") +
+    theme_report(),
+  "Stillbirth Rate by Study")
+
+# NND
+ppt <- add_title_slide(ppt, "Neonatal Death Analysis", "Rates and Risk Factors")
+ppt <- add_plot_slide(ppt,
+  ggplot(nnd_by_study, aes(x=reorder(study_source,rate), y=rate)) +
+    geom_col(fill=COLORS$outcomes["NND"], width=0.7, alpha=0.9) +
+    geom_errorbar(aes(ymin=ci_low, ymax=ci_high), width=0.25) +
+    geom_text(aes(label=sprintf("%.1f", rate)), hjust=-0.2, size=4.5, fontface="bold") +
+    coord_flip() + scale_y_continuous(expand=expansion(mult=c(0, 0.2))) +
+    labs(title="NND Rate by Study", subtitle="NND/LB x1000", x=NULL, y="Rate/1000") +
+    theme_report(),
+  "NND Rate by Study")
+
+# Birth chars
+ppt <- add_title_slide(ppt, "Birth Characteristics", "GA, BW, Sex, Apgar")
+
+ppt <- add_plot_slide(ppt,
+  ggplot(ga_data, aes(x=out_ga_weeks, fill=study_source)) +
+    geom_histogram(binwidth=1, color="white", alpha=0.8) +
+    geom_vline(xintercept=37, linetype="dashed", color="#E74C3C", linewidth=1) +
+    scale_fill_manual(values=COLORS$studies, name="Study") +
+    scale_x_continuous(breaks=seq(15,46,5)) +
+    labs(title="Gestational Age Distribution", x="Weeks", y="Count") + theme_report(),
+  "GA Distribution")
+
+ppt <- add_plot_slide(ppt,
+  ggplot(bw_data, aes(x=out_birthweight_g, fill=study_source)) +
+    geom_histogram(binwidth=100, color="white", alpha=0.8) +
+    geom_vline(xintercept=2500, linetype="dashed", color="#E74C3C", linewidth=1) +
+    scale_fill_manual(values=COLORS$studies, name="Study") +
+    scale_x_continuous(labels=comma) +
+    labs(title="Birthweight Distribution", x="Grams", y="Count") + theme_report(),
+  "Birthweight Distribution")
+
+ppt <- add_plot_slide(ppt,
+  ggplot(sex_data, aes(x=study_source, y=n, fill=sex_clean)) +
+    geom_col(position="fill", width=0.75) +
+    scale_fill_manual(values=COLORS$sex, name="Sex") +
+    scale_y_continuous(labels=percent) +
+    labs(title="Infant Sex Distribution", x=NULL, y="Proportion") +
+    theme_report() + theme(axis.text.x=element_text(angle=45, hjust=1)),
+  "Sex Distribution")
+
+ppt <- add_plot_slide(ppt,
+  ggplot(apgar_data, aes(x=birth_outcome, y=out_apgar_5min, fill=birth_outcome)) +
+    geom_boxplot(width=0.6, outlier.alpha=0.3) +
+    scale_fill_manual(values=c("Stillbirth"="#C0392B","Neonatal Death"="#8E44AD","Survived"="#27AE60")) +
+    labs(title="Apgar by Outcome", x=NULL, y="5-min Apgar") + theme_report(),
+  "Apgar by Outcome")
+
+# Maternal
+ppt <- add_title_slide(ppt, "Maternal Characteristics", "Demographics")
+ppt <- add_plot_slide(ppt,
+  ggplot(age_data, aes(x=mat_age, fill=study_source)) +
+    geom_histogram(binwidth=2, color="white", alpha=0.8) +
+    geom_vline(xintercept=c(18,35), linetype="dashed", color="#E74C3C") +
+    scale_fill_manual(values=COLORS$studies, name="Study") +
+    labs(title="Maternal Age Distribution", x="Age (years)", y="Count") + theme_report(),
+  "Maternal Age")
+
+# Completeness
+ppt <- add_title_slide(ppt, "Data Completeness", "Quality Assessment")
+p_out <- plot_completeness_hm(unified, var_group_outcomes, "Outcomes Completeness")
+if (!is.null(p_out)) ppt <- add_plot_slide(ppt, p_out, "Outcomes Completeness")
+p_mat <- plot_completeness_hm(unified, var_group_maternal, "Maternal Completeness")
+if (!is.null(p_mat)) ppt <- add_plot_slide(ppt, p_mat, "Maternal Completeness")
+p_hh <- plot_completeness_hm(unified, var_group_household, "Household Completeness")
+if (!is.null(p_hh)) ppt <- add_plot_slide(ppt, p_hh, "Household Completeness")
+
+ppt <- add_plot_slide(ppt,
+  ggplot(group_summary, aes(x=reorder(group, mean_pct), y=mean_pct, fill=group)) +
+    geom_col(width=0.7, show.legend=FALSE) +
+    geom_errorbar(aes(ymin=min_pct, ymax=max_pct), width=0.25) +
+    geom_text(aes(label=sprintf("%.1f%%", mean_pct)), hjust=-0.1, size=4.5, fontface="bold") +
+    coord_flip() + scale_fill_brewer(palette="Set2") +
+    scale_y_continuous(expand=expansion(mult=c(0, 0.2)), limits=c(0, 100)) +
+    labs(title="Completeness by Group", x=NULL, y="%") + theme_report(),
+  "Completeness by Group")
+
+# Variable deep dive
+ppt <- add_title_slide(ppt, "Variable Deep Dive", "All Key Variables")
+
+plot_variable <- function(df, var, title=NULL) {
+  if (!var %in% names(df)) return(NULL)
+  x <- df[[var]]; if (is.null(title)) title <- var
+  if (is.numeric(x)) {
+    x_clean <- x[!is.na(x)]; if (length(x_clean)<10) return(NULL)
+    ggplot(data.frame(x=x_clean), aes(x=x)) +
+      geom_histogram(bins=30, fill="#3498DB", color="white", alpha=0.8) +
+      labs(title=title, subtitle=sprintf("N=%s | Mean=%.1f | Median=%.1f",
+        format(length(x_clean),big.mark=","), mean(x_clean), median(x_clean)),
+        x=var, y="Count") + theme_report()
+  } else {
+    x_chr <- as.character(x)
+    x_chr[is.na(x_chr)|trimws(x_chr)==""] <- "<Missing>"
+    tab <- as.data.frame(table(x_chr)) %>% arrange(desc(Freq)) %>% slice_head(n=15) %>%
+      mutate(pct=Freq/sum(Freq)*100)
+    ggplot(tab, aes(x=reorder(x_chr,Freq), y=Freq, fill=Freq)) +
+      geom_col(show.legend=FALSE) +
+      geom_text(aes(label=sprintf("%s (%.1f%%)", format(Freq,big.mark=","), pct)),
+                hjust=-0.05, size=3.5) +
+      coord_flip() + scale_fill_gradient(low="#85C1E9", high="#2E86AB") +
+      scale_y_continuous(expand=expansion(mult=c(0, 0.3))) +
+      labs(title=title, subtitle=sprintf("Top categories (N=%s)", format(sum(tab$Freq),big.mark=",")),
+           x=NULL, y="Count") + theme_report()
+  }
+}
+
+for (v in c("out_stillbirth","out_nnd","out_livebirth","out_perinatal_death",
+            "out_preterm","out_lbw","out_sga","out_fresh_stillbirth","out_macerated_stillbirth")) {
+  p <- plot_variable(unified, v); if (!is.null(p)) ppt <- add_plot_slide(ppt, p, paste("Variable:", v))
+}
+for (v in c("out_ga_weeks","out_ga_method","out_birthweight_g","out_infant_sex","out_apgar_1min","out_apgar_5min","out_multiple")) {
+  p <- plot_variable(unified, v); if (!is.null(p)) ppt <- add_plot_slide(ppt, p, paste("Variable:", v))
+}
+for (v in c("mat_age","mat_marital_status","mat_education","mat_religion","mat_ethnicity",
+            "mat_parity","mat_gravidity","mat_delivery_mode","mat_delivery_location",
+            "mat_birth_attendant","mat_hiv_status","mat_hypertension","mat_preeclampsia","mat_anc_visits")) {
+  p <- plot_variable(unified, v); if (!is.null(p)) ppt <- add_plot_slide(ppt, p, paste("Variable:", v))
+}
+for (v in c("mat_country","mat_facility","mat_urban_rural","study_design","module")) {
+  p <- plot_variable(unified, v); if (!is.null(p)) ppt <- add_plot_slide(ppt, p, paste("Variable:", v))
+}
+for (v in c("hh_wealth_quintile","hh_ses_binary","hh_electricity","hh_water_source",
+            "hh_sanitation","hh_cooking_fuel","hh_house_wall","hh_house_floor",
+            "hh_house_ownership","hh_mosquito_net","hh_ppi_score","hh_asset_score")) {
+  p <- plot_variable(unified, v); if (!is.null(p)) ppt <- add_plot_slide(ppt, p, paste("Variable:", v))
+}
+# v10.17: Environmental variables
+for (v in c("env_elevation","env_slope","env_temp_mean_delivery","env_humidity_delivery",
+            "env_precipitation_delivery","env_heat_index_delivery","env_pm25_annual",
+            "env_season_delivery","env_season_conception")) {
+  p <- plot_variable(unified, v); if (!is.null(p)) ppt <- add_plot_slide(ppt, p, paste("Variable:", v))
+}
+
+# Final summary
+ppt <- add_title_slide(ppt, "Summary & Next Steps",
+  sprintf("Total: %s records | %d countries | %d studies\n\nSBR: %.1f/1000 | NND: %.1f/1000 | PMR: %.1f/1000\nPreterm: %.1f%% | LBW: %.1f%%",
+          format(nrow(unified),big.mark=","),
+          n_distinct(unified$mat_country, na.rm=TRUE),
+          n_distinct(unified$study_source),
+          overall$SBR, overall$NND_Rate, overall$PMR,
+          overall$Preterm_pct, overall$LBW_pct))
+
+# Remove existing file if present (avoids "file is open" error)
+if (file.exists(PPTX_PATH)) try(file.remove(PPTX_PATH), silent = TRUE)
+print(ppt, target=PPTX_PATH)
+cat(sprintf("\nPowerPoint saved: %s\n", PPTX_PATH))
+cat(sprintf("Total slides: ~%d\n", length(ppt)))
+```
+
+# Session Info
+
+```{r session-info}
+cat("\n====================================================================\n")
+cat("                    ANALYSIS COMPLETE\n")
+cat("====================================================================\n\n")
+cat(sprintf("Completed: %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S")))
+cat(sprintf("Version: %s\n", VERSION))
+cat(sprintf("PPTX: %s\n", PPTX_PATH))
+cat("\n★ v10.13 Features (merged from v10.12 + DHS integration):\n")
+cat("  - All v10.12 report sections retained:\n")
+cat("    - Rate verification table\n")
+cat("    - Temporal distribution by year\n")
+cat("    - Stillbirth by country (lollipop chart)\n")
+cat("    - Age at death distribution (faceted + stacked)\n")
+cat("    - GA combined histogram\n")
+cat("    - Preterm rate by study\n")
+cat("    - Birthweight boxplot\n")
+cat("    - LBW rate by study\n")
+cat("    - Apgar by study (faceted)\n")
+cat("    - Age categories\n")
+cat("    - Marital status\n")
+cat("    - Religion\n")
+cat("    - Multiple birth\n")
+cat("    - SB by GA category (cross-tab)\n")
+cat("    - NND by birthweight (cross-tab)\n")
+cat("    - Outcomes by education (cross-tab)\n")
+cat("  - v10.11+ Extended analyses retained:\n")
+cat("    - Stillbirth threshold analysis (20wks vs 28wks)\n")
+cat("    - Extended preterm categories (Very preterm, Extremely preterm)\n")
+cat("    - Extended LBW categories (VLBW, ELBW)\n")
+cat("    - Size for Gestational Age (SGA/AGA/LGA)\n")
+cat("    - Hypertension staging analysis\n")
+cat("    - Clinical risk factor prevalence\n")
+cat("    - Outcomes by hypertension status\n")
+cat("    - Outcomes by SGA status\n")
+cat("    - Standardized education and delivery mode categories\n")
+cat("  - ★ v10.15 UPDATES:\n")
+cat("    - DHS as 7th study source (merged_unified_dataset_v10.15.rds)\n")
+cat("    - Merged dataset created by DHS pipeline Step 10\n")
+cat("    - GA method tracking (out_ga_method: Ballard/Clinical/Maternal recall)\n")
+cat("    - GA method distribution by study (plot + table)\n")
+cat("    - GA statistics by measurement method (boxplot + summary)\n")
+cat("    - Outcomes by GA method cross-tabulation\n")
+cat("    - Study design distribution (Facility-based vs Population-based)\n")
+cat("    - Module distribution by study\n")
+cat("    - DHS survey coverage by country and module\n")
+cat("    - Study metadata summary table (design, module, weights)\n")
+cat("    - Updated color palette with DHS\n")
+cat("    - Corrected module values (NCOPS, PTBi)\n")
+cat("  - ★ v10.17 UPDATES:\n")
+cat("    - DHS religion labels decoded from haven and harmonised (Christian/Muslim/Traditional/No religion/Other)\n")
+cat("    - DHS ethnicity labels decoded from haven (country-specific text)\n")
+cat("    - DHS birth attendant extracted from m3a-m3n binary variables\n")
+cat("    - Environmental data re-extracted at real GPS (55,919 unique coordinates, v3.4)\n")
+cat("    - Environmental variables: elevation, slope, temperature, humidity, precipitation, heat index, PM2.5, season\n")
+cat("    - GA +7 rollover fix (7,924 records corrected)\n")
+cat("    - GA weeks rounded to 4 decimal places\n")
+cat("    - GA obstetric string (e.g. 38+3) added\n")
+cat("    - 11 clinical columns restored (mat_eclampsia, mat_aph, mat_diabetes, etc.)\n")
+cat("    - Comprehensive factor conversion (83 columns) for proper Stata .dta export\n")
+cat("    - Factor level fixes (3 columns with silent 100%% data loss corrected)\n")
+cat("    - Value recoding: Health center/Hospital -> Health facility, Indeterminate -> Ambiguous\n")
+cat("    - Implausible date capping (35 out_dob + 3,949 out_dod values capped to NA)\n")
+cat("    - Character-to-numeric type conversion (27+ columns)\n")
+cat("    - Column coalescing: 16 duplicate variable pairs merged\n")
+cat("    - 141 columns, 5,996,390 rows across 7 studies\n\n")
+sessionInfo()
+```
