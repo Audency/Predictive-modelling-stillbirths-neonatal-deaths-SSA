@@ -1,8 +1,71 @@
+<p align="center">
+  <img src="https://img.shields.io/badge/R-%3E%3D4.3-276DC3?style=for-the-badge&logo=r&logoColor=white" alt="R">
+  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
+  <img src="https://img.shields.io/badge/Data-v10.17-orange?style=for-the-badge" alt="Dataset">
+  <img src="https://img.shields.io/badge/Wellcome-Accelerator%20Award-E5B13A?style=for-the-badge" alt="Wellcome">
+</p>
+
 # Predictive Modelling for Stillbirths and Neonatal Deaths in Sub-Saharan Africa
 
 Reproducible analytical pipeline for data harmonisation and predictive modelling across seven contributing studies (ALERT, EN-INDEPTH, PTBi, PRECISE, WHOMCS, NCOPS, DHS). Implements a 13-domain harmonisation framework and classical, machine learning and AI modelling approaches. Associated with a Wellcome Accelerator Award at the London School of Hygiene and Tropical Medicine.
 
-## Pipeline overview
+<p align="center">
+  <a href="https://doi.org/10.12688/wellcomeopenres.25574.1"><img src="https://img.shields.io/badge/DOI-10.12688%2Fwellcomeopenres.25574.1-blue?style=flat-square" alt="DOI"></a>
+  <a href="https://osf.io/ptf7x/overview"><img src="https://img.shields.io/badge/OSF-ptf7x-lightblue?style=flat-square&logo=osf" alt="OSF"></a>
+</p>
+
+---
+
+## At a Glance
+
+```
+ 3,210,530 births   |   33 SSA countries   |   7 studies   |   2010-2024
+      141 variables  |  13 harmonisation domains  |  v10.17 unified dataset
+```
+
+### Perinatal Outcome Rates
+
+```
+ Stillbirth Rate (SBR)          10.4 per 1,000 total births    (n = 33,394)
+ Neonatal Death Rate (NND)      30.4 per 1,000 live births     (n = 96,694)
+ Perinatal Mortality Rate (PMR) 40.5 per 1,000 total births    (n = 130,088)
+```
+
+### Contributing Studies
+
+```
+ ALERT        Facility-based   |   The Gambia, Kenya, Mozambique
+ DHS          Population survey |   33 SSA countries
+ EN-INDEPTH   HDSS cohort      |   5 countries
+ NCOPS        Observational    |   Uganda
+ PRECISE      Prospective      |   The Gambia, Kenya, Mozambique
+ PTBi         Cluster RCT      |   Kenya, Uganda
+ WHOMCS       Multi-country    |   7 SSA countries
+```
+
+---
+
+## Project Phases
+
+```mermaid
+graph LR
+    A["Phase 1<br/><b>Data Harmonisation</b><br/>R | pipeline/"] --> B["Phase 2<br/><b>Descriptive Analysis</b><br/>R | descriptive_analysis/"]
+    B --> C["Phase 3<br/><b>Predictive Modelling</b><br/>Python | upcoming"]
+    style A fill:#4575b4,color:#fff,stroke:#333
+    style B fill:#91bfdb,color:#1a1a2e,stroke:#333
+    style C fill:#fee090,color:#1a1a2e,stroke:#333,stroke-dasharray: 5 5
+```
+
+| Phase | Directory | Language | Status |
+|-------|-----------|----------|--------|
+| 1. Data Harmonisation | `pipeline/` | R | Complete |
+| 2. Descriptive Analysis | `descriptive_analysis/` | R | Complete |
+| 3. Predictive Modelling | *TBD* | Python | Upcoming |
+
+---
+
+## Phase 1: Data Harmonisation Pipeline
 
 The pipeline produces a unified analytical dataset (v10.17) from six prospective cohort studies and national DHS surveys across Sub-Saharan Africa, linked with geospatial environmental exposures. Scripts are numbered in execution order and should be run sequentially from the project root directory.
 
@@ -38,24 +101,45 @@ The pipeline produces a unified analytical dataset (v10.17) from six prospective
 |--------|-------------|
 | `legacy/outcomes_harmonisation_v7.do` | Stata do-file for outcomes variable harmonisation (historical reference) |
 
-### Descriptive Analysis (Pre-Modeling)
+---
+
+## Phase 2: Descriptive Analysis (Pre-Modeling)
+
+Comprehensive characterisation of the unified dataset prior to predictive modelling. Generates an interactive HTML report, Excel workbook, and PowerPoint presentation.
 
 | Script | Description |
 |--------|-------------|
-| `descriptive_analysis/LSHTM_Descriptive_PreModeling_Report.Rmd` | Comprehensive descriptive analysis report: Tables 1--3, outcome epidemiology, covariate distributions, missingness, pre-modeling readiness assessment. Outputs HTML, Excel, and PowerPoint. |
+| `descriptive_analysis/LSHTM_Descriptive_PreModeling_Report.Rmd` | Main report: Tables 1--3, outcome epidemiology, covariate distributions, missingness, pre-modeling readiness. Outputs HTML + Excel + PPTX. |
 | `descriptive_analysis/render_report.R` | Rendering wrapper for the Rmd report |
 | `descriptive_analysis/EDA_df_ssa_from2010_pipeline_v2.R` | Standalone EDA pipeline for the SSA 2010+ subset |
 | `descriptive_analysis/SSA_StudyType_Descriptive_Pipeline.R` | Study-type stratified descriptive pipeline |
 
-**Key findings** (3,210,530 records; 33 countries; 7 studies; 2010--2024):
+### Key Findings
 
-- Stillbirth rate: 10.4 per 1,000 total births (n=33,394)
-- Neonatal death rate: 30.4 per 1,000 live births (n=96,694)
-- Perinatal mortality rate: 40.5 per 1,000 total births
-- DHS contributes ~85% of records; significant heterogeneity across studies
-- Bivariate analyses (Table 2) show maternal age, birthweight, and GA significantly associated with both outcomes
+- **Stillbirth rate:** 10.4 per 1,000 total births (n = 33,394)
+- **Neonatal death rate:** 30.4 per 1,000 live births (n = 96,694)
+- **Perinatal mortality rate:** 40.5 per 1,000 total births (n = 130,088)
+- DHS contributes ~85% of records; significant heterogeneity across study sources
+- Bivariate analyses (Table 2) confirm maternal age, birthweight, and gestational age as significantly associated with both stillbirth and neonatal death (p < 0.001)
+- Data completeness varies markedly by study: core variables (age, GA, BW) available in >70% of records globally
 
-See [`descriptive_analysis/README.md`](descriptive_analysis/README.md) for full details.
+### Report Output Summary
+
+| Output | Contents |
+|--------|----------|
+| **HTML Report** | 13 sections: executive summary, geographic map, study composition, outcome epidemiology, maternal/birth characteristics, cross-tabulations, Tables 1--3, covariate heatmap, missingness, pre-modeling readiness, environmental variables |
+| **Excel Workbook** | 10 sheets: study distribution, overview, covariate availability, candidates, inventory, readiness, missingness, outcomes, Table 2a (SB), Table 2b (NND) |
+| **PowerPoint** | 13 slides: title, summary, study sizes, SSA map, outcome rates, birth distributions, ridgelines, readiness, candidates, heatmap, cross-tabs, key findings, recommendations |
+
+See [`descriptive_analysis/README.md`](descriptive_analysis/README.md) for full details and instructions.
+
+---
+
+## Phase 3: Predictive Modelling *(upcoming)*
+
+Classical ML, ensemble methods, and deep learning approaches for stillbirth and neonatal death prediction. Implementation in Python.
+
+---
 
 ## Configuration
 
@@ -66,32 +150,31 @@ All scripts that require a base path detect the current user and set paths accor
 
 Scripts 01, 05 and 11 use relative paths by default and require no configuration.
 
-## Version history
+## Version History
 
-- **v10.17** (current): Final cleaned dataset with standardised dates, coalesced duplicate columns, cleaned gestational age values, and logically ordered columns (~130 variables)
-- **v10.16**: Added real DHS cluster-level GPS coordinates (replacing country centroids), restored DHS religion/ethnicity/birth attendant labels
-- **v10.15**: Base unified dataset merging six prospective studies with DHS data and environmental variable placeholders
+| Version | Description |
+|---------|-------------|
+| **v10.17** (current) | Final cleaned dataset with standardised dates, coalesced duplicate columns, cleaned gestational age values, and logically ordered columns (~130 variables) |
+| **v10.16** | Added real DHS cluster-level GPS coordinates (replacing country centroids), restored DHS religion/ethnicity/birth attendant labels |
+| **v10.15** | Base unified dataset merging six prospective studies with DHS data and environmental variable placeholders |
 
 Environmental pipeline versions: v3.4 (optimised extraction at unique coordinates), v3.3 (complete integrated extraction), v3.2/v3.1 (earlier iterations)
 
-## Data access
+## Data Access
 
 Individual-level data from the contributing studies are not publicly available due to ethical restrictions. DHS data can be requested from the [DHS Program](https://dhsprogram.com/).
 
-## Associated resources
+## Associated Resources
 
 - **OSF:** <https://osf.io/ptf7x/overview>
 - **DOI:** [10.12688/wellcomeopenres.25574.1](https://doi.org/10.12688/wellcomeopenres.25574.1)
 
-## Project Phases
+## Authors
 
-1. **Data Harmonisation** (`pipeline/`) — 13-domain harmonisation of 7 studies into unified dataset v10.17 (R)
-2. **Descriptive Analysis** (`descriptive_analysis/`) — Pre-modeling characterisation, Tables 1--3, outcome epidemiology, data quality assessment (R)
-3. **Predictive Modelling** — Classical ML, ensemble methods, and deep learning for stillbirth/neonatal death prediction (Python — upcoming)
-
-## Author
-
-Joseph Akuze, London School of Hygiene and Tropical Medicine
+| Name | Role | Affiliation |
+|------|------|-------------|
+| **Joseph Akuze** | Principal Investigator | London School of Hygiene & Tropical Medicine |
+| **Audencio Victor** | Health Data Scientist | London School of Hygiene & Tropical Medicine |
 
 ## Licence
 
