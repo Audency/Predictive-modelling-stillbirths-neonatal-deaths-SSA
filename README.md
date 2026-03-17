@@ -38,6 +38,25 @@ The pipeline produces a unified analytical dataset (v10.17) from six prospective
 |--------|-------------|
 | `legacy/outcomes_harmonisation_v7.do` | Stata do-file for outcomes variable harmonisation (historical reference) |
 
+### Descriptive Analysis (Pre-Modeling)
+
+| Script | Description |
+|--------|-------------|
+| `descriptive_analysis/LSHTM_Descriptive_PreModeling_Report.Rmd` | Comprehensive descriptive analysis report: Tables 1--3, outcome epidemiology, covariate distributions, missingness, pre-modeling readiness assessment. Outputs HTML, Excel, and PowerPoint. |
+| `descriptive_analysis/render_report.R` | Rendering wrapper for the Rmd report |
+| `descriptive_analysis/EDA_df_ssa_from2010_pipeline_v2.R` | Standalone EDA pipeline for the SSA 2010+ subset |
+| `descriptive_analysis/SSA_StudyType_Descriptive_Pipeline.R` | Study-type stratified descriptive pipeline |
+
+**Key findings** (3,210,530 records; 33 countries; 7 studies; 2010--2024):
+
+- Stillbirth rate: 10.4 per 1,000 total births (n=33,394)
+- Neonatal death rate: 30.4 per 1,000 live births (n=96,694)
+- Perinatal mortality rate: 40.5 per 1,000 total births
+- DHS contributes ~85% of records; significant heterogeneity across studies
+- Bivariate analyses (Table 2) show maternal age, birthweight, and GA significantly associated with both outcomes
+
+See [`descriptive_analysis/README.md`](descriptive_analysis/README.md) for full details.
+
 ## Configuration
 
 All scripts that require a base path detect the current user and set paths accordingly. If running on a new machine, either:
@@ -63,6 +82,12 @@ Individual-level data from the contributing studies are not publicly available d
 
 - **OSF:** <https://osf.io/ptf7x/overview>
 - **DOI:** [10.12688/wellcomeopenres.25574.1](https://doi.org/10.12688/wellcomeopenres.25574.1)
+
+## Project Phases
+
+1. **Data Harmonisation** (`pipeline/`) — 13-domain harmonisation of 7 studies into unified dataset v10.17 (R)
+2. **Descriptive Analysis** (`descriptive_analysis/`) — Pre-modeling characterisation, Tables 1--3, outcome epidemiology, data quality assessment (R)
+3. **Predictive Modelling** — Classical ML, ensemble methods, and deep learning for stillbirth/neonatal death prediction (Python — upcoming)
 
 ## Author
 

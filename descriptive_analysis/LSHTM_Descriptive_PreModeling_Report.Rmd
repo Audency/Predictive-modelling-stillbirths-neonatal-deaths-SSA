@@ -1,0 +1,2791 @@
+---
+title: "Predicting Stillbirth & Neonatal Death in Sub-Saharan Africa"
+subtitle: "Comprehensive Descriptive Analysis & Pre-Modeling Report"
+author: "Audencio Victor | LSHTM"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: kate
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    code_folding: hide
+    df_print: paged
+    fig_width: 11
+    fig_height: 7
+    css: !expr NULL
+params:
+  data_path: "unified_dataset_with_env_v10.17_cleaned.rds"
+  dataset_dir: "../Dataset"
+  output_dir: "../outputs_descriptive_report"
+  global_threshold: 70
+  type_threshold: 60
+  study_threshold: 60
+---
+
+```{css custom-styles, echo=FALSE}
+/* ══════════════════════════════════════════════════════════════
+   LSHTM Editorial Theme — Inspired by academic journal layouts
+   Clean, professional, no visual clutter
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {
+  --ink: #1a1a2e;
+  --muted: #4a4a6a;
+  --rule: #d0d0e8;
+  --accent1: #c0392b;
+  --accent2: #2c7fb8;
+  --accent3: #16a085;
+  --bg: #fafaf8;
+  --paper: #ffffff;
+  --highlight: #f7f3e9;
+}
+
+/* ── Global ── */
+body {
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  background-color: var(--bg);
+  color: var(--ink);
+  line-height: 1.7;
+  font-size: 14px;
+}
+
+/* ── Headers — editorial style ── */
+h1, h2, h3, h4 {
+  font-family: 'IBM Plex Sans', sans-serif;
+  color: var(--ink);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin-top: 48px;
+}
+
+h1 {
+  font-size: 1.6em;
+  border-bottom: 3px solid var(--ink);
+  padding-bottom: 10px;
+}
+
+h2 {
+  font-size: 0.95em;
+  border-bottom: none;
+  border-left: 4px solid var(--accent2);
+  padding-left: 12px;
+  padding-bottom: 0;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+h3 {
+  font-size: 1.05em;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 6px;
+}
+
+/* ── KPI Cards — clean bordered style ── */
+.metric-card {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  padding: 18px 22px;
+  border-radius: 0;
+  margin: 6px;
+  display: inline-block;
+  min-width: 180px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.metric-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: var(--accent2);
+}
+
+.metric-card .metric-value {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 2em;
+  font-weight: 700;
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink);
+}
+
+.metric-card .metric-label {
+  font-size: 0.75em;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.card-blue::before { background: var(--accent2); }
+.card-green::before { background: var(--accent3); }
+.card-orange::before { background: var(--accent1); }
+.card-purple::before { background: #7c4dff; }
+.card-teal::before { background: #00838f; }
+
+/* ── Info boxes — editorial callouts ── */
+.info-box {
+  background: var(--highlight);
+  border-left: 4px solid var(--accent2);
+  padding: 16px 20px;
+  border-radius: 0;
+  margin: 24px 0;
+  font-size: 0.92em;
+  color: var(--ink);
+}
+
+.warning-box {
+  background: #fef9f9;
+  border-left: 4px solid var(--accent1);
+  padding: 16px 20px;
+  border-radius: 0;
+  margin: 24px 0;
+  font-size: 0.92em;
+}
+
+.success-box {
+  background: #f0f8f4;
+  border-left: 4px solid var(--accent3);
+  padding: 16px 20px;
+  border-radius: 0;
+  margin: 24px 0;
+  font-size: 0.92em;
+}
+
+/* ── Section dividers ── */
+.section-divider {
+  height: 2px;
+  background: var(--ink);
+  border: none;
+  border-radius: 0;
+  margin: 48px 0;
+}
+
+/* ── Tables — dark header, clean rows ── */
+.gt_table {
+  border-radius: 0 !important;
+  overflow: hidden;
+  box-shadow: none;
+  border: 1px solid var(--rule);
+}
+
+/* ── Tabs ── */
+.nav-tabs > li > a {
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 0.9em;
+  letter-spacing: 0.03em;
+}
+
+.nav-tabs > li.active > a {
+  border-bottom: 3px solid var(--accent1) !important;
+}
+
+.tab-content {
+  padding: 24px 0;
+}
+
+/* ── TOC — minimal sidebar ── */
+.tocify {
+  border: 1px solid var(--rule) !important;
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--paper);
+}
+
+.tocify-header {
+  font-weight: 600;
+  font-size: 0.85em;
+}
+
+.tocify a {
+  color: var(--muted);
+}
+
+.tocify .active a {
+  color: var(--ink);
+  border-left: 3px solid var(--accent1);
+}
+
+/* ── Figure containers ── */
+.figure-panel {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  padding: 16px;
+  margin: 16px 0;
+}
+
+/* ── Print ── */
+@media print {
+  body { background: white; font-size: 11px; }
+  .section-divider { background: #000; height: 1px; }
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.align  = "center",
+  fig.retina = 2,
+  dpi        = 150,
+  cache      = FALSE
+)
+```
+
+```{r packages}
+# ── Package management ──
+required_pkgs <- c(
+  "dplyr", "tidyr", "stringr", "forcats", "purrr", "tibble", "readr",
+  "ggplot2", "scales", "plotly", "patchwork", "viridis", "RColorBrewer",
+  "gtsummary", "gt", "DT", "kableExtra",
+  "janitor", "pheatmap", "corrplot", "ggridges",
+  "officer", "flextable", "openxlsx",
+  "sf", "rnaturalearth", "rnaturalearthdata",
+  "htmltools"
+)
+
+for (p in required_pkgs) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    install.packages(p, repos = "https://cloud.r-project.org", quiet = TRUE)
+  }
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(forcats)
+  library(purrr)
+  library(tibble)
+  library(ggplot2)
+  library(scales)
+  library(plotly)
+  library(patchwork)
+  library(viridis)
+  library(RColorBrewer)
+  library(gtsummary)
+  library(gt)
+  library(DT)
+  library(kableExtra)
+  library(janitor)
+  library(pheatmap)
+  library(corrplot)
+  library(ggridges)
+  library(officer)
+  library(flextable)
+  library(openxlsx)
+  library(htmltools)
+})
+```
+
+```{r theme-setup}
+# ── Custom ggplot2 theme — clean, no grid lines ──
+theme_lshtm <- function(base_size = 13) {
+  theme_minimal(base_size = base_size, base_family = "sans") +
+    theme(
+      plot.title       = element_text(face = "bold", size = rel(1.15), color = "#1a1a2e",
+                                       margin = margin(b = 8)),
+      plot.subtitle    = element_text(size = rel(0.85), color = "#4a4a6a",
+                                       margin = margin(b = 12)),
+      plot.caption     = element_text(size = rel(0.7), color = "#8e99a4", hjust = 0),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line        = element_line(color = "#d0d0e8", linewidth = 0.4),
+      axis.title       = element_text(size = rel(0.85), color = "#4a4a6a", face = "plain"),
+      axis.text        = element_text(size = rel(0.8), color = "#4a4a6a"),
+      legend.position  = "bottom",
+      legend.title     = element_text(face = "bold", size = rel(0.8)),
+      legend.text      = element_text(size = rel(0.75)),
+      strip.text       = element_text(face = "bold", size = rel(0.85), color = "#1a1a2e"),
+      strip.background = element_rect(fill = "#f0f0f8", color = NA),
+      plot.margin      = margin(12, 12, 12, 12),
+      plot.background  = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA)
+    )
+}
+
+theme_set(theme_lshtm())
+
+# Palettes
+pal_main     <- c("#2c7fb8", "#253494", "#41b6c4", "#7fcdbb", "#c7e9b4",
+                  "#ffffcc", "#d73027", "#fc8d59", "#fee090", "#91bfdb")
+pal_outcomes <- c("Stillbirth" = "#d73027", "Neonatal Death" = "#fc8d59",
+                  "Preterm" = "#fee090", "LBW" = "#91bfdb", "SGA" = "#4575b4")
+pal_study    <- scales::hue_pal()(10)
+
+# Helper functions
+safe_num <- function(x) suppressWarnings(as.numeric(as.character(x)))
+
+to01 <- function(x) {
+  if (is.null(x)) return(rep(NA_integer_, 0))
+  if (is.logical(x)) return(ifelse(is.na(x), NA_integer_, as.integer(x)))
+  if (is.numeric(x)) {
+    ux <- sort(unique(x[!is.na(x)]))
+    if (length(ux) == 0) return(as.integer(x))
+    if (all(ux %in% c(0, 1))) return(as.integer(x))
+    if (all(ux %in% c(1, 2))) return(ifelse(is.na(x), NA_integer_, as.integer(x == 2)))
+    return(ifelse(is.na(x), NA_integer_, as.integer(x > 0)))
+  }
+  z <- tolower(trimws(as.character(x)))
+  z[z %in% c("", "na", "n/a", "missing", "unknown")] <- NA
+  out <- rep(NA_integer_, length(z))
+  out[z %in% c("yes", "y", "true", "t", "1", "sim", "s")] <- 1L
+  out[z %in% c("no", "n", "false", "f", "0", "nao", "nao")] <- 0L
+  out
+}
+
+rate_1000 <- function(events, denom) {
+  ifelse(denom > 0, round(events / denom * 1000, 1), NA_real_)
+}
+
+fmt_n <- function(x) format(x, big.mark = ",", scientific = FALSE)
+
+# ── Reusable gt theme ──
+gt_lshtm <- function(data, title = NULL, subtitle = NULL) {
+  out <- data
+  if (!is.null(title)) {
+    out <- out %>% tab_header(
+      title = md(paste0("**", title, "**")),
+      subtitle = if (!is.null(subtitle)) md(paste0("*", subtitle, "*")) else NULL
+    )
+  }
+  out %>%
+    tab_style(
+      style = cell_text(color = "white", weight = "bold"),
+      locations = cells_column_labels()
+    ) %>%
+    tab_options(
+      table.font.size        = px(13),
+      heading.background.color     = "#1a3a5c",
+      heading.title.font.size      = px(16),
+      column_labels.background.color = "#2c7fb8",
+      column_labels.font.weight    = "bold",
+      row_group.background.color   = "#eef5fc",
+      table.border.top.color       = "#1a3a5c",
+      table.border.bottom.color    = "#1a3a5c"
+    )
+}
+```
+
+```{r load-data}
+# ── Load dataset ──
+data_file <- file.path(params$dataset_dir, params$data_path)
+if (!file.exists(data_file)) {
+  data_file <- params$data_path
+}
+
+df_raw <- readRDS(data_file)
+df_raw <- janitor::clean_names(df_raw)
+
+# ── Country standardisation ──
+country_var <- intersect(c("mat_country", "loc_country", "country"), names(df_raw))[1]
+
+df_raw[[country_var]][df_raw[[country_var]] %in%
+  c("Dem Rep Of The Congo", "Congo Democratic Republic")] <- "Democratic Republic of the Congo"
+df_raw[[country_var]][df_raw[[country_var]] == "Congo"]   <- "Republic of the Congo"
+df_raw[[country_var]][df_raw[[country_var]] == "Gambia"]   <- "The Gambia"
+df_raw[[country_var]][df_raw[[country_var]] == "Swaziland"] <- "Eswatini"
+
+# ── String cleaning ──
+for (j in names(df_raw)) {
+  if (is.character(df_raw[[j]])) {
+    x <- trimws(df_raw[[j]])
+    x[x %in% c("", "NA", "N/A", "na", "n/a", "missing", "unknown", "Unknown", "UNK")] <- NA
+    df_raw[[j]] <- x
+  }
+}
+
+# ── SSA + >= 2010 filter ──
+ssa_countries <- c(
+  "Uganda", "Benin", "Malawi", "Tanzania", "Mozambique", "Kenya", "The Gambia",
+  "Guinea-Bissau", "Ethiopia", "Ghana", "Angola", "Democratic Republic of the Congo",
+  "Republic of the Congo", "Niger", "Nigeria", "Burkina Faso", "Burundi", "Cameroon",
+  "Central African Republic", "Chad", "Comoros", "Cote d'Ivoire", "Eswatini", "Gabon",
+  "Guinea", "Lesotho", "Liberia", "Madagascar", "Mali", "Mauritania", "Namibia",
+  "Rwanda", "Sao Tome and Principe", "Senegal", "Sierra Leone", "South Africa",
+  "Sudan", "Togo", "Zambia", "Zimbabwe", "Botswana", "Cabo Verde", "Djibouti",
+  "Equatorial Guinea", "Eritrea", "Somalia", "South Sudan"
+)
+
+year_var <- intersect(c("studyyear", "study_year", "year"), names(df_raw))[1]
+
+df <- df_raw %>%
+  filter(
+    !is.na(.data[[year_var]]),
+    safe_num(.data[[year_var]]) >= 2010,
+    !is.na(.data[[country_var]]),
+    .data[[country_var]] %in% ssa_countries
+  )
+
+# ── Column identification ──
+study_var  <- intersect(c("study_source", "study", "source"), names(df))[1]
+site_var   <- intersect(c("site", "site_id", "facility", "loc_site"), names(df))[1]
+sex_var    <- intersect(c("neo_sex", "sex", "child_sex"), names(df))[1]
+lat_var    <- intersect(c("env_latitude", "lat", "latitude"), names(df))[1]
+lon_var    <- intersect(c("env_longitude", "lon", "longitude"), names(df))[1]
+
+# Outcomes
+V_SB   <- intersect(c("out_stillbirth", "stillbirth"), names(df))[1]
+V_LB   <- intersect(c("out_livebirth", "livebirth"), names(df))[1]
+V_NND  <- intersect(c("out_nnd", "nnd", "out_neonatal_death"), names(df))[1]
+V_PND  <- intersect(c("out_perinatal_death", "perinatal_death"), names(df))[1]
+V_PRE  <- intersect(c("out_preterm", "preterm"), names(df))[1]
+V_LBW  <- intersect(c("out_lbw", "lbw"), names(df))[1]
+V_VLBW <- intersect(c("out_vlbw", "vlbw"), names(df))[1]
+V_SGA  <- intersect(c("out_sga", "sga"), names(df))[1]
+
+# Continuous
+V_GA   <- intersect(c("out_ga_weeks", "ga_weeks"), names(df))[1]
+V_BW   <- intersect(c("out_birthweight_g", "birthweight_g"), names(df))[1]
+V_AGE  <- intersect(c("mat_age", "maternal_age"), names(df))[1]
+V_EDU  <- intersect(c("mat_education", "education"), names(df))[1]
+V_MODE <- intersect(c("delivery_mode", "mat_delivery_mode"), names(df))[1]
+V_MAR  <- intersect(c("mat_marital_status", "marital_status"), names(df))[1]
+V_MULT <- intersect(c("multiple_birth", "twin", "plurality"), names(df))[1]
+V_SBP  <- intersect(c("mat_sbp", "sbp"), names(df))[1]
+V_DBP  <- intersect(c("mat_dbp", "dbp"), names(df))[1]
+V_AP1  <- intersect(c("neo_apgar_1", "apgar1"), names(df))[1]
+V_AP5  <- intersect(c("neo_apgar_5", "apgar5"), names(df))[1]
+V_EARLY <- intersect(c("out_early_neonatal_death", "early_nnd"), names(df))[1]
+V_LATE  <- intersect(c("out_late_neonatal_death", "late_nnd"), names(df))[1]
+V_AGEDEATH <- intersect(c("neo_age_at_death_days", "age_at_death_days"), names(df))[1]
+
+# Environmental
+env_vars <- grep("^env_", names(df), value = TRUE)
+env_num  <- env_vars[sapply(df[env_vars], is.numeric)]
+
+# Study type classification
+df <- df %>%
+  mutate(
+    study_type = case_when(
+      str_detect(tolower(.data[[study_var]]), "dhs")                     ~ "Survey / DHS",
+      str_detect(tolower(.data[[study_var]]), "who|whomcs")              ~ "Facility / WHO",
+      str_detect(tolower(.data[[study_var]]), "alert|precise|ptbi|ncops|indepth|amanhi|interbio|biob") ~ "Cohort / Clinical",
+      str_detect(tolower(.data[[study_var]]), "registry|surveillance")   ~ "Registry / Surveillance",
+      TRUE ~ "Other"
+    )
+  )
+
+# Key counts
+N_TOTAL     <- nrow(df)
+N_VARS      <- ncol(df)
+N_COUNTRIES <- n_distinct(df[[country_var]])
+N_STUDIES   <- if (!is.na(study_var)) n_distinct(df[[study_var]]) else NA
+
+# Output directory
+dir.create(params$output_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+<hr class="section-divider">
+
+# Executive Summary {.tabset .tabset-fade}
+
+## Key Metrics
+
+```{r exec-cards, results='asis'}
+yy <- safe_num(df[[year_var]])
+yr_range <- paste0(min(yy, na.rm = TRUE), " - ", max(yy, na.rm = TRUE))
+
+sb_n <- if (!is.na(V_SB)) sum(to01(df[[V_SB]]) == 1, na.rm = TRUE) else NA
+lb_n <- if (!is.na(V_LB)) sum(to01(df[[V_LB]]) == 1, na.rm = TRUE) else NA
+nnd_n <- if (!is.na(V_NND)) sum(to01(df[[V_NND]]) == 1, na.rm = TRUE) else NA
+
+tb_n <- NA
+if (!is.na(V_SB) && !is.na(V_LB)) {
+  sb01 <- to01(df[[V_SB]]); lb01 <- to01(df[[V_LB]])
+  tb_n <- sum((sb01 == 1) | (lb01 == 1), na.rm = TRUE)
+}
+
+sbr <- if (!is.na(sb_n) && !is.na(tb_n) && tb_n > 0) rate_1000(sb_n, tb_n) else NA
+nnd_rate <- if (!is.na(nnd_n) && !is.na(lb_n) && lb_n > 0) rate_1000(nnd_n, lb_n) else NA
+pmr <- if (!is.na(sb_n) && !is.na(nnd_n) && !is.na(tb_n) && tb_n > 0) rate_1000(sb_n + nnd_n, tb_n) else NA
+
+cat('<div style="text-align:center; margin: 30px 0;">\n')
+cat(sprintf('<div class="metric-card card-blue"><span class="metric-value">%s</span><span class="metric-label">Total Records</span></div>\n', fmt_n(N_TOTAL)))
+cat(sprintf('<div class="metric-card card-green"><span class="metric-value">%s</span><span class="metric-label">Variables</span></div>\n', fmt_n(N_VARS)))
+cat(sprintf('<div class="metric-card card-purple"><span class="metric-value">%s</span><span class="metric-label">Countries</span></div>\n', N_COUNTRIES))
+cat(sprintf('<div class="metric-card"><span class="metric-value">%s</span><span class="metric-label">Studies</span></div>\n', N_STUDIES))
+cat(sprintf('<div class="metric-card card-teal"><span class="metric-value">%s</span><span class="metric-label">Year Range</span></div>\n', yr_range))
+cat('</div>\n')
+
+cat('<div style="text-align:center; margin: 20px 0;">\n')
+if (!is.na(sbr)) cat(sprintf('<div class="metric-card card-orange"><span class="metric-value">%s</span><span class="metric-label">SBR per 1,000</span></div>\n', sbr))
+if (!is.na(nnd_rate)) cat(sprintf('<div class="metric-card card-orange"><span class="metric-value">%s</span><span class="metric-label">NND rate per 1,000 LB</span></div>\n', nnd_rate))
+if (!is.na(pmr)) cat(sprintf('<div class="metric-card card-orange"><span class="metric-value">%s</span><span class="metric-label">PMR per 1,000</span></div>\n', pmr))
+cat('</div>\n')
+```
+
+<div class="info-box">
+**Data source:** Unified dataset v10.17 (cleaned) filtered for Sub-Saharan Africa and studies from 2010 onwards. Outcomes use correct epidemiological denominators: SBR = SB/Total Births, NND rate = NND/Live Births, PMR = (SB+NND)/Total Births.
+</div>
+
+## Rate Verification
+
+```{r rate-verification}
+if (!is.na(V_SB) && !is.na(V_LB)) {
+  rate_tbl <- tibble(
+    Metric = c("Stillbirths (SB)", "Live Births (LB)", "Total Births (TB)",
+               "Neonatal Deaths (NND)", "SBR per 1,000 (SB/TB)",
+               "NND rate per 1,000 (NND/LB)", "PMR per 1,000 ((SB+NND)/TB)"),
+    Value = c(
+      fmt_n(sb_n), fmt_n(lb_n), fmt_n(tb_n),
+      if (!is.na(nnd_n)) fmt_n(nnd_n) else "N/A",
+      if (!is.na(sbr)) as.character(sbr) else "N/A",
+      if (!is.na(nnd_rate)) as.character(nnd_rate) else "N/A",
+      if (!is.na(pmr)) as.character(pmr) else "N/A"
+    )
+  )
+
+  rate_tbl %>%
+    gt() %>%
+    cols_label(Metric = "Indicator", Value = "Value") %>%
+    tab_style(style = cell_fill(color = "#fef3f0"), locations = cells_body(rows = c(5, 6, 7))) %>%
+    tab_style(style = cell_text(weight = "bold"), locations = cells_body(columns = Value)) %>%
+    gt_lshtm(title = "Outcome Rate Verification")
+}
+```
+
+<hr class="section-divider">
+
+# Study Overview {.tabset .tabset-fade}
+
+## Study Characteristics
+
+```{r study-overview-table}
+if (!is.na(study_var)) {
+  study_overview <- df %>%
+    group_by(study = .data[[study_var]]) %>%
+    summarise(
+      Type        = first(study_type),
+      N_records   = n(),
+      N_countries = n_distinct(.data[[country_var]]),
+      Year_min    = min(safe_num(.data[[year_var]]), na.rm = TRUE),
+      Year_max    = max(safe_num(.data[[year_var]]), na.rm = TRUE),
+      SB_avail    = if (!is.na(V_SB)) round(100 * mean(!is.na(.data[[V_SB]])), 1) else NA_real_,
+      NND_avail   = if (!is.na(V_NND)) round(100 * mean(!is.na(.data[[V_NND]])), 1) else NA_real_,
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Pct_total  = round(100 * N_records / sum(N_records), 1),
+      Year_range = paste0(Year_min, "-", Year_max)
+    ) %>%
+    arrange(desc(N_records))
+
+  study_overview %>%
+    select(study, Type, N_records, N_countries, Year_range, Pct_total, SB_avail, NND_avail) %>%
+    gt() %>%
+    cols_label(
+      study = "Study", Type = "Type", N_records = "N Records",
+      N_countries = "Countries", Year_range = "Years",
+      Pct_total = "% Total", SB_avail = "SB Avail %", NND_avail = "NND Avail %"
+    ) %>%
+    fmt_number(columns = N_records, decimals = 0, use_seps = TRUE) %>%
+    data_color(columns = Pct_total, palette = c("#e8f5e9", "#c8e6c9", "#81c784"), domain = c(0, 100)) %>%
+    data_color(columns = c(SB_avail, NND_avail), palette = c("#fce4ec", "#fff8e1", "#e8f5e9"), domain = c(0, 100)) %>%
+    gt_lshtm(title = "Study Overview", subtitle = "SSA, 2010 onwards")
+}
+```
+
+## Records per Study & Type
+
+```{r study-overview-viz, fig.height=8, fig.width=12}
+if (!is.na(study_var) && exists("study_overview")) {
+  so <- study_overview %>%
+    mutate(study = factor(study, levels = study[order(N_records)]))
+
+  # Panel A: N per study (horizontal bar)
+  p_n <- ggplot(so, aes(x = study, y = N_records, fill = Type)) +
+    geom_col(alpha = 0.9, width = 0.7) +
+    geom_text(aes(label = paste0(fmt_n(N_records), " (", Pct_total, "%)")),
+              hjust = -0.05, size = 3, color = "#1a1a2e") +
+    scale_fill_brewer(palette = "Set2") +
+    scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.25))) +
+    coord_flip() +
+    labs(title = "A. Records per Study", x = NULL, y = "N Records", fill = "Study Type")
+
+  # Panel B: Stacked proportion bar
+  p_prop <- ggplot(so, aes(x = "", y = N_records, fill = study)) +
+    geom_col(width = 0.8, color = "white", linewidth = 0.5) +
+    scale_fill_viridis_d(option = "D") +
+    coord_flip() +
+    scale_y_continuous(labels = comma) +
+    labs(title = "B. Proportional Contribution", x = NULL, y = "N Records", fill = "Study") +
+    theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+          axis.line.y = element_blank())
+
+  # Panel C: N per study type
+  type_n <- study_overview %>%
+    group_by(Type) %>%
+    summarise(N = sum(N_records), Studies = n(), .groups = "drop") %>%
+    mutate(Type = factor(Type, levels = Type[order(N)]))
+
+  p_type <- ggplot(type_n, aes(x = Type, y = N, fill = Type)) +
+    geom_col(alpha = 0.9, width = 0.6, show.legend = FALSE) +
+    geom_text(aes(label = paste0(fmt_n(N), "\n(", Studies, " studies)")),
+              hjust = -0.05, size = 2.8, color = "#1a1a2e") +
+    scale_fill_brewer(palette = "Set2") +
+    scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.35))) +
+    coord_flip() +
+    labs(title = "C. Records per Study Type", x = NULL, y = "N Records")
+
+  (p_n / (p_prop | p_type)) +
+    plot_layout(heights = c(2, 1)) +
+    plot_annotation(
+      title = "Study Sample Size Overview",
+      subtitle = paste0("Total: ", fmt_n(sum(so$N_records)), " records across ", nrow(so), " studies"),
+      theme = theme(
+        plot.title = element_text(face = "bold", size = 16, color = "#1a1a2e"),
+        plot.subtitle = element_text(size = 11, color = "#4a4a6a")
+      )
+    )
+}
+```
+
+<hr class="section-divider">
+
+# Study & Geographic Distribution {.tabset .tabset-fade}
+
+## By Study Source
+
+```{r study-distribution-plotly}
+if (!is.na(study_var)) {
+  study_dist <- df %>%
+    count(.data[[study_var]], name = "n") %>%
+    mutate(pct = round(100 * n / sum(n), 1)) %>%
+    arrange(n) %>%
+    mutate(study = factor(.data[[study_var]], levels = .data[[study_var]]))
+
+  p <- ggplot(study_dist, aes(x = study, y = n, fill = n,
+                               text = paste0(.data[[study_var]], "\nN = ", fmt_n(n), " (", pct, "%)"))) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_viridis_c(option = "D", direction = -1) +
+    coord_flip() +
+    scale_y_continuous(labels = comma) +
+    labs(title = "Records by Study Source", x = NULL, y = "Number of Records",
+         caption = "Source: Unified dataset v10.17") +
+    theme(plot.title = element_text(size = 16))
+
+  ggplotly(p, tooltip = "text") %>%
+    layout(margin = list(l = 150))
+}
+```
+
+## By Study Type
+
+```{r study-type-dist}
+type_dist <- df %>%
+  count(study_type, name = "n") %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  arrange(desc(n))
+
+p <- ggplot(type_dist, aes(x = reorder(study_type, n), y = n, fill = study_type,
+                            text = paste0(study_type, "\nN = ", fmt_n(n), " (", pct, "%)"))) +
+  geom_col(show.legend = FALSE, alpha = 0.9) +
+  scale_fill_brewer(palette = "Set2") +
+  coord_flip() +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Records by Study Type", x = NULL, y = "Number of Records")
+
+ggplotly(p, tooltip = "text")
+```
+
+## Geographic Distribution
+
+```{r geographic-distribution-composed, fig.height=10, fig.width=14}
+if (!is.na(country_var)) {
+  ctry <- df %>%
+    count(.data[[country_var]], name = "n") %>%
+    rename(country = 1) %>%
+    mutate(pct = round(100 * n / sum(n), 1))
+
+  # Panel A: Africa map
+  p_map <- NULL
+  if (requireNamespace("rnaturalearth", quietly = TRUE) &&
+      requireNamespace("sf", quietly = TRUE)) {
+    africa <- rnaturalearth::ne_countries(
+      continent = "Africa", returnclass = "sf"
+    )
+    africa_map <- africa %>%
+      left_join(ctry, by = c("name" = "country")) %>%
+      mutate(n = ifelse(is.na(n) | n == 0, NA_real_, n))
+
+    p_map <- ggplot(africa_map) +
+      geom_sf(aes(fill = log1p(n)),
+              color = "grey70", linewidth = 0.3) +
+      scale_fill_viridis_c(
+        option = "C",
+        name = "Records\n(log scale)",
+        labels = function(x) fmt_n(round(expm1(x))),
+        na.value = "white"
+      ) +
+      coord_sf(xlim = c(-20, 55), ylim = c(-40, 40)) +
+      labs(title = "A. Geographic Coverage") +
+      theme_void(base_size = 12) +
+      theme(
+        plot.title = element_text(
+          face = "bold", color = "#1a1a2e", size = 13
+        ),
+        legend.position = "bottom",
+        legend.key.width = unit(1.5, "cm"),
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 7)
+      )
+  }
+
+  # Panel B: Top 20 countries bar chart
+  ctry_top <- ctry %>%
+    arrange(desc(n)) %>%
+    slice_head(n = 20) %>%
+    mutate(country = factor(country, levels = rev(country)))
+
+  p_bar <- ggplot(ctry_top,
+    aes(x = country, y = n, fill = n)) +
+    geom_col(show.legend = FALSE, alpha = 0.9) +
+    geom_text(
+      aes(label = fmt_n(n)),
+      hjust = -0.05, size = 2.8, color = "#1a1a2e"
+    ) +
+    scale_fill_viridis_c(option = "C", direction = -1) +
+    coord_flip() +
+    scale_y_continuous(
+      labels = comma,
+      expand = expansion(mult = c(0, 0.2))
+    ) +
+    labs(
+      title = "B. Top 20 Countries by Records",
+      x = NULL, y = "N Records"
+    )
+
+  # Compose: map + bar side by side
+  if (!is.null(p_map)) {
+    p_map + p_bar +
+      plot_layout(widths = c(1.2, 1)) +
+      plot_annotation(
+        title = "Geographic Distribution of Records",
+        subtitle = paste0(
+          n_distinct(ctry$country), " countries | ",
+          fmt_n(sum(ctry$n)), " total records"
+        ),
+        theme = theme(
+          plot.title = element_text(
+            face = "bold", size = 15, color = "#1a1a2e"
+          ),
+          plot.subtitle = element_text(
+            size = 10, color = "#4a4a6a"
+          )
+        )
+      )
+  } else {
+    p_bar
+  }
+}
+```
+
+## Temporal Trends
+
+```{r temporal-trends-composed, fig.height=8, fig.width=12}
+if (!is.na(year_var)) {
+  yr_data <- df %>%
+    mutate(year = safe_num(.data[[year_var]])) %>%
+    filter(!is.na(year))
+
+  yr_overall <- yr_data %>% count(year, name = "n")
+  yr_by_type <- yr_data %>% count(year, study_type, name = "n")
+
+  p1 <- ggplot(yr_overall, aes(x = year, y = n)) +
+    geom_area(fill = "#2c7fb8", alpha = 0.15) +
+    geom_line(color = "#2c7fb8", linewidth = 1) +
+    geom_point(color = "#1a1a2e", size = 2) +
+    scale_y_continuous(labels = comma) +
+    scale_x_continuous(breaks = scales::pretty_breaks()) +
+    labs(title = "A. Overall Records Over Time",
+         x = "Year", y = "Records")
+
+  p2 <- ggplot(yr_by_type, aes(x = year, y = n,
+                                 fill = study_type)) +
+    geom_area(alpha = 0.7) +
+    scale_fill_brewer(palette = "Set2") +
+    scale_y_continuous(labels = comma) +
+    scale_x_continuous(breaks = scales::pretty_breaks()) +
+    labs(title = "B. Records by Study Type",
+         x = "Year", y = "Records", fill = "Type")
+
+  p1 + p2 +
+    plot_layout(ncol = 2) +
+    plot_annotation(
+      title = "Temporal Distribution of Records",
+      theme = theme(
+        plot.title = element_text(
+          face = "bold", size = 15, color = "#1a1a2e"
+        )
+      )
+    )
+}
+```
+
+<hr class="section-divider">
+
+# Primary Outcomes Analysis {.tabset .tabset-fade}
+
+## Outcome Rates by Study
+
+```{r outcomes-by-study-composed, fig.height=8, fig.width=14}
+sb01 <- if (!is.na(V_SB)) to01(df[[V_SB]]) else NULL
+lb01 <- if (!is.na(V_LB)) to01(df[[V_LB]]) else NULL
+nnd01 <- if (!is.na(V_NND)) to01(df[[V_NND]]) else NULL
+
+plots_study <- list()
+
+if (!is.null(sb01) && !is.null(lb01) && !is.na(study_var)) {
+  tb01 <- (sb01 == 1) | (lb01 == 1)
+  sb_by_study <- df %>%
+    mutate(.sb = sb01, .tb = tb01) %>%
+    group_by(study = .data[[study_var]]) %>%
+    summarise(
+      SB = sum(.sb == 1, na.rm = TRUE),
+      TB = sum(.tb, na.rm = TRUE),
+      SBR = rate_1000(SB, TB), .groups = "drop"
+    ) %>% filter(TB > 0) %>% arrange(SBR)
+
+  plots_study$sb <- ggplot(
+    sb_by_study,
+    aes(x = reorder(study, SBR), y = SBR, fill = SBR)
+  ) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_gradient(
+      low = "#fee090", high = "#d73027"
+    ) +
+    coord_flip() +
+    labs(title = "A. Stillbirth Rate by Study",
+         x = NULL, y = "SBR per 1,000")
+}
+
+if (!is.null(nnd01) && !is.null(lb01) && !is.na(study_var)) {
+  nnd_by_study <- df %>%
+    mutate(.nnd = nnd01, .lb = lb01) %>%
+    group_by(study = .data[[study_var]]) %>%
+    summarise(
+      NND = sum(.nnd == 1, na.rm = TRUE),
+      LB = sum(.lb == 1, na.rm = TRUE),
+      NND_rate = rate_1000(NND, LB), .groups = "drop"
+    ) %>% filter(LB > 0) %>% arrange(NND_rate)
+
+  plots_study$nnd <- ggplot(
+    nnd_by_study,
+    aes(x = reorder(study, NND_rate), y = NND_rate,
+        fill = NND_rate)
+  ) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_gradient(
+      low = "#e0f3f8", high = "#4575b4"
+    ) +
+    coord_flip() +
+    labs(title = "B. Neonatal Death Rate by Study",
+         x = NULL, y = "NND per 1,000 LB")
+}
+
+if (length(plots_study) == 2) {
+  plots_study$sb + plots_study$nnd +
+    plot_annotation(
+      title = "Perinatal Outcome Rates by Study",
+      theme = theme(
+        plot.title = element_text(
+          face = "bold", size = 15, color = "#1a1a2e"
+        )
+      )
+    )
+} else if (length(plots_study) == 1) {
+  plots_study[[1]]
+}
+```
+
+## Outcome Rates by Country
+
+```{r outcomes-by-country-composed, fig.height=10, fig.width=14}
+plots_cty <- list()
+
+if (!is.null(sb01) && !is.null(lb01) && !is.na(country_var)) {
+  tb01 <- (sb01 == 1) | (lb01 == 1)
+  sb_by_cty <- df %>%
+    mutate(.sb = sb01, .tb = tb01) %>%
+    group_by(country = .data[[country_var]]) %>%
+    summarise(
+      SB = sum(.sb == 1, na.rm = TRUE),
+      TB = sum(.tb, na.rm = TRUE),
+      SBR = rate_1000(SB, TB), .groups = "drop"
+    ) %>% filter(TB >= 50) %>% arrange(SBR)
+
+  plots_cty$sb <- ggplot(sb_by_cty,
+    aes(x = reorder(country, SBR), y = SBR)) +
+    geom_segment(aes(xend = country, y = 0, yend = SBR),
+                 linewidth = 0.6, color = "#fc8d59") +
+    geom_point(aes(size = TB),
+               color = "#d73027", alpha = 0.8) +
+    scale_size_continuous(
+      range = c(1.5, 6), labels = comma,
+      name = "Total Births"
+    ) +
+    coord_flip() +
+    labs(title = "A. SBR by Country",
+         x = NULL, y = "SBR per 1,000")
+}
+
+if (!is.null(nnd01) && !is.null(lb01) && !is.na(country_var)) {
+  nnd_by_cty <- df %>%
+    mutate(.nnd = nnd01, .lb = lb01) %>%
+    group_by(country = .data[[country_var]]) %>%
+    summarise(
+      NND = sum(.nnd == 1, na.rm = TRUE),
+      LB = sum(.lb == 1, na.rm = TRUE),
+      NND_rate = rate_1000(NND, LB), .groups = "drop"
+    ) %>% filter(LB >= 50) %>% arrange(NND_rate)
+
+  plots_cty$nnd <- ggplot(nnd_by_cty,
+    aes(x = reorder(country, NND_rate), y = NND_rate)) +
+    geom_segment(
+      aes(xend = country, y = 0, yend = NND_rate),
+      linewidth = 0.6, color = "#91bfdb"
+    ) +
+    geom_point(aes(size = LB),
+               color = "#4575b4", alpha = 0.8) +
+    scale_size_continuous(
+      range = c(1.5, 6), labels = comma,
+      name = "Live Births"
+    ) +
+    coord_flip() +
+    labs(title = "B. NND Rate by Country",
+         x = NULL, y = "NND per 1,000 LB")
+}
+
+if (length(plots_cty) == 2) {
+  plots_cty$sb + plots_cty$nnd +
+    plot_annotation(
+      title = "Perinatal Outcome Rates by Country (min 50 births)",
+      theme = theme(
+        plot.title = element_text(
+          face = "bold", size = 15, color = "#1a1a2e"
+        )
+      )
+    )
+} else if (length(plots_cty) == 1) {
+  plots_cty[[1]]
+}
+```
+
+## Outcome Summary
+
+```{r outcome-summary-table}
+outcome_list <- na.omit(c(V_SB, V_LB, V_NND, V_PND, V_PRE, V_LBW, V_VLBW, V_SGA))
+outcome_list <- unique(outcome_list)
+
+if (length(outcome_list) > 0) {
+  out_counts <- bind_rows(lapply(outcome_list, function(v) {
+    y <- to01(df[[v]])
+    tibble(
+      Outcome  = v,
+      Events   = sum(y == 1, na.rm = TRUE),
+      Denominator = sum(!is.na(y)),
+      Prevalence  = round(mean(y == 1, na.rm = TRUE) * 100, 2),
+      `Rate per 1,000` = rate_1000(sum(y == 1, na.rm = TRUE), sum(!is.na(y)))
+    )
+  }))
+
+  out_counts %>%
+    gt() %>%
+    fmt_number(columns = c(Events, Denominator), decimals = 0, use_seps = TRUE) %>%
+    fmt_number(columns = Prevalence, decimals = 2, pattern = "{x}%") %>%
+    data_color(columns = Prevalence, palette = c("#e8f5e9", "#fff8e1", "#fce4ec"), domain = NULL) %>%
+    gt_lshtm(title = "All Outcome Prevalences")
+}
+```
+
+## Outcomes by Study Type
+
+```{r outcomes-by-type}
+if (length(outcome_list) > 0) {
+  out_by_type <- bind_rows(lapply(outcome_list, function(v) {
+    y <- to01(df[[v]])
+    df %>%
+      mutate(y_tmp = y) %>%
+      group_by(study_type) %>%
+      summarise(
+        outcome     = v,
+        n_available = sum(!is.na(y_tmp)),
+        events      = sum(y_tmp == 1, na.rm = TRUE),
+        rate_1000   = rate_1000(events, n_available),
+        .groups     = "drop"
+      )
+  }))
+
+  p <- ggplot(out_by_type %>% filter(!is.na(rate_1000)),
+              aes(x = study_type, y = rate_1000, fill = outcome,
+                  text = paste0(outcome, "\n", study_type, "\nRate: ", rate_1000, " per 1,000"))) +
+    geom_col(position = position_dodge(width = 0.8), alpha = 0.85, width = 0.7) +
+    scale_fill_brewer(palette = "Set1") +
+    coord_flip() +
+    labs(title = "Outcome Rates by Study Type",
+         x = NULL, y = "Rate per 1,000", fill = "Outcome")
+
+  ggplotly(p, tooltip = "text")
+}
+```
+
+<hr class="section-divider">
+
+# Birth Characteristics {.tabset .tabset-fade}
+
+## GA & Birthweight Distributions
+
+```{r ga-bw-distributions-composed, fig.height=8, fig.width=14}
+plots_dist <- list()
+
+if (!is.na(V_GA)) {
+  dga <- tibble(ga = safe_num(df[[V_GA]])) %>%
+    filter(!is.na(ga), ga >= 15, ga <= 45)
+  if (nrow(dga) > 0) {
+    plots_dist$ga <- ggplot(dga, aes(x = ga)) +
+      geom_histogram(
+        aes(y = after_stat(density)),
+        bins = 50, fill = "#2c7fb8", alpha = 0.6,
+        color = "white"
+      ) +
+      geom_density(color = "#c0392b", linewidth = 0.8) +
+      geom_vline(
+        xintercept = 37, linetype = "dashed",
+        color = "#c0392b", linewidth = 0.6
+      ) +
+      annotate(
+        "text", x = 36.5, y = Inf,
+        label = "37w (term)", hjust = 1, vjust = 1.5,
+        color = "#c0392b", size = 3, fontface = "bold"
+      ) +
+      labs(
+        title = "A. Gestational Age",
+        subtitle = paste0(
+          "N=", fmt_n(nrow(dga)),
+          " | Median=", median(dga$ga), "w"
+        ),
+        x = "GA (weeks)", y = "Density"
+      )
+  }
+}
+
+if (!is.na(V_BW)) {
+  dbw <- tibble(bw = safe_num(df[[V_BW]])) %>%
+    filter(!is.na(bw), bw >= 300, bw <= 6000)
+  if (nrow(dbw) > 0) {
+    plots_dist$bw <- ggplot(dbw, aes(x = bw)) +
+      geom_histogram(
+        aes(y = after_stat(density)),
+        bins = 60, fill = "#41b6c4", alpha = 0.6,
+        color = "white"
+      ) +
+      geom_density(color = "#1a1a2e", linewidth = 0.8) +
+      geom_vline(
+        xintercept = 2500, linetype = "dashed",
+        color = "#c0392b", linewidth = 0.6
+      ) +
+      annotate(
+        "text", x = 2400, y = Inf,
+        label = "2,500g (LBW)", hjust = 1, vjust = 1.5,
+        color = "#c0392b", size = 3, fontface = "bold"
+      ) +
+      labs(
+        title = "B. Birthweight",
+        subtitle = paste0(
+          "N=", fmt_n(nrow(dbw)),
+          " | Median=", median(dbw$bw), "g"
+        ),
+        x = "Birthweight (g)", y = "Density"
+      )
+  }
+}
+
+if (length(plots_dist) >= 2) {
+  plots_dist$ga + plots_dist$bw +
+    plot_annotation(
+      title = "Key Birth Characteristic Distributions",
+      theme = theme(
+        plot.title = element_text(
+          face = "bold", size = 15, color = "#1a1a2e"
+        )
+      )
+    )
+} else if (length(plots_dist) == 1) {
+  plots_dist[[1]]
+}
+```
+
+## GA & BW by Study (Ridgeline)
+
+```{r ga-bw-ridgeline-composed, fig.height=10, fig.width=14}
+plots_ridge <- list()
+
+if (!is.na(V_GA) && !is.na(study_var)) {
+  dga_s <- df %>%
+    transmute(
+      study = .data[[study_var]],
+      ga = safe_num(.data[[V_GA]])
+    ) %>%
+    filter(!is.na(ga), ga >= 15, ga <= 45)
+  if (nrow(dga_s) > 0) {
+    plots_ridge$ga <- ggplot(
+      dga_s,
+      aes(x = ga,
+          y = fct_reorder(study, ga, .fun = median),
+          fill = study)
+    ) +
+      geom_density_ridges(
+        alpha = 0.5, scale = 1.2,
+        rel_min_height = 0.01
+      ) +
+      scale_fill_viridis_d(option = "D") +
+      geom_vline(
+        xintercept = 37, linetype = "dashed",
+        color = "#c0392b", linewidth = 0.4
+      ) +
+      labs(title = "A. GA by Study",
+           x = "GA (weeks)", y = NULL) +
+      theme(legend.position = "none")
+  }
+}
+
+if (!is.na(V_BW) && !is.na(study_var)) {
+  dbw_s <- df %>%
+    transmute(
+      study = .data[[study_var]],
+      bw = safe_num(.data[[V_BW]])
+    ) %>%
+    filter(!is.na(bw), bw >= 300, bw <= 6000)
+  if (nrow(dbw_s) > 0) {
+    plots_ridge$bw <- ggplot(
+      dbw_s,
+      aes(x = bw,
+          y = fct_reorder(study, bw, .fun = median),
+          fill = study)
+    ) +
+      geom_density_ridges(
+        alpha = 0.5, scale = 1.2,
+        rel_min_height = 0.01
+      ) +
+      scale_fill_viridis_d(option = "C") +
+      geom_vline(
+        xintercept = 2500, linetype = "dashed",
+        color = "#c0392b", linewidth = 0.4
+      ) +
+      labs(title = "B. Birthweight by Study",
+           x = "Birthweight (g)", y = NULL) +
+      theme(legend.position = "none")
+  }
+}
+
+if (length(plots_ridge) >= 2) {
+  plots_ridge$ga + plots_ridge$bw +
+    plot_annotation(
+      title = "Birth Characteristics by Study (Ridgeline)",
+      theme = theme(
+        plot.title = element_text(
+          face = "bold", size = 15, color = "#1a1a2e"
+        )
+      )
+    )
+} else if (length(plots_ridge) == 1) {
+  plots_ridge[[1]]
+}
+```
+
+## GA vs Birthweight
+
+```{r ga-bw-scatter}
+if (!is.na(V_GA) && !is.na(V_BW)) {
+  d <- df %>%
+    transmute(
+      ga = safe_num(.data[[V_GA]]),
+      bw = safe_num(.data[[V_BW]]),
+      sb = if (!is.na(V_SB)) factor(to01(.data[[V_SB]]), labels = c("Live Birth", "Stillbirth")) else "All"
+    ) %>%
+    filter(!is.na(ga), !is.na(bw), ga >= 15, ga <= 45, bw >= 300, bw <= 6000)
+
+  if (nrow(d) > 0) {
+    # Sample for performance
+    set.seed(42)
+    d_sample <- if (nrow(d) > 15000) slice_sample(d, n = 15000) else d
+
+    p <- ggplot(d_sample, aes(x = ga, y = bw, color = sb,
+                               text = paste0("GA: ", ga, "w\nBW: ", bw, "g\n", sb))) +
+      geom_point(alpha = 0.3, size = 1) +
+      geom_smooth(method = "loess", se = TRUE, linewidth = 1.2) +
+      scale_color_manual(values = c("Live Birth" = "#2c7fb8", "Stillbirth" = "#d73027", "All" = "#2c7fb8")) +
+      geom_hline(yintercept = 2500, linetype = "dashed", color = "grey50", linewidth = 0.4) +
+      geom_vline(xintercept = 37, linetype = "dashed", color = "grey50", linewidth = 0.4) +
+      labs(title = "Gestational Age vs Birthweight",
+           subtitle = paste0("Sample: ", fmt_n(nrow(d_sample)), " / ", fmt_n(nrow(d))),
+           x = "GA (weeks)", y = "Birthweight (g)", color = "Outcome")
+
+    ggplotly(p, tooltip = "text")
+  }
+}
+```
+
+## Preterm & LBW Categories
+
+```{r preterm-categories}
+if (!is.na(V_GA) && !is.na(study_var)) {
+  dga_cat <- df %>%
+    transmute(study = .data[[study_var]], ga = safe_num(.data[[V_GA]])) %>%
+    filter(!is.na(ga), ga >= 15, ga <= 45) %>%
+    mutate(
+      preterm_cat = factor(case_when(
+        ga < 28 ~ "<28w (Extreme preterm)",
+        ga < 32 ~ "28-31w (Very preterm)",
+        ga < 37 ~ "32-36w (Moderate/Late preterm)",
+        TRUE    ~ ">=37w (Term)"
+      ), levels = c("<28w (Extreme preterm)", "28-31w (Very preterm)", "32-36w (Moderate/Late preterm)", ">=37w (Term)"))
+    )
+
+  tab <- dga_cat %>%
+    count(study, preterm_cat, name = "n") %>%
+    group_by(study) %>%
+    mutate(pct = round(100 * n / sum(n), 1)) %>%
+    ungroup()
+
+  p <- ggplot(tab, aes(x = fct_reorder(study, pct, .fun = sum), y = pct, fill = preterm_cat,
+                        text = paste0(study, "\n", preterm_cat, "\n", pct, "%"))) +
+    geom_col(alpha = 0.9) +
+    scale_fill_manual(values = c("#d73027", "#fc8d59", "#fee090", "#91bfdb")) +
+    coord_flip() +
+    labs(title = "Preterm Categories by Study", x = NULL, y = "%", fill = "Category")
+
+  ggplotly(p, tooltip = "text") %>% layout(margin = list(l = 150))
+}
+```
+
+<hr class="section-divider">
+
+# Maternal Characteristics {.tabset .tabset-fade}
+
+## Maternal Age
+
+```{r maternal-age-composed, fig.height=6, fig.width=14}
+if (!is.na(V_AGE)) {
+  dage <- tibble(age = safe_num(df[[V_AGE]])) %>%
+    filter(!is.na(age), age >= 10, age <= 60)
+
+  if (nrow(dage) > 0) {
+    p_dist <- ggplot(dage, aes(x = age)) +
+      geom_histogram(
+        aes(y = after_stat(density)),
+        bins = 50, fill = "#7fcdbb",
+        alpha = 0.6, color = "white"
+      ) +
+      geom_density(color = "#1a1a2e", linewidth = 0.8) +
+      geom_vline(
+        xintercept = 35, linetype = "dashed",
+        color = "#c0392b", linewidth = 0.5
+      ) +
+      annotate(
+        "text", x = 36, y = Inf,
+        label = "AMA (35+)", hjust = 0, vjust = 1.5,
+        color = "#c0392b", size = 3, fontface = "bold"
+      ) +
+      labs(
+        title = "A. Age Distribution",
+        subtitle = paste0(
+          "N=", fmt_n(nrow(dage)),
+          " | Median=", median(dage$age), "y"
+        ),
+        x = "Age (years)", y = "Density"
+      )
+
+    dage_cat <- dage %>%
+      mutate(age_cat = factor(case_when(
+        age < 18 ~ "<18", age < 20 ~ "18-19",
+        age < 25 ~ "20-24", age < 30 ~ "25-29",
+        age < 35 ~ "30-34", age < 40 ~ "35-39",
+        TRUE ~ "40+"
+      ), levels = c("<18", "18-19", "20-24",
+                    "25-29", "30-34", "35-39", "40+")))
+
+    tab <- dage_cat %>%
+      count(age_cat, name = "n") %>%
+      mutate(pct = round(100 * n / sum(n), 1))
+
+    p_cat <- ggplot(tab,
+      aes(x = age_cat, y = n, fill = age_cat)) +
+      geom_col(show.legend = FALSE, alpha = 0.85) +
+      geom_text(
+        aes(label = paste0(pct, "%")),
+        vjust = -0.3, size = 3, color = "#1a1a2e"
+      ) +
+      scale_fill_brewer(palette = "YlGnBu") +
+      scale_y_continuous(
+        labels = comma,
+        expand = expansion(mult = c(0, 0.1))
+      ) +
+      labs(title = "B. Age Categories",
+           x = "Age Group", y = "N")
+
+    p_dist + p_cat +
+      plot_annotation(
+        title = "Maternal Age Profile",
+        theme = theme(
+          plot.title = element_text(
+            face = "bold", size = 15,
+            color = "#1a1a2e"
+          )
+        )
+      )
+  }
+}
+```
+
+## Education & Sociodemographic
+
+```{r education}
+if (!is.na(V_EDU)) {
+  edu_tab <- df %>%
+    filter(!is.na(.data[[V_EDU]])) %>%
+    count(level = .data[[V_EDU]], name = "n") %>%
+    mutate(pct = round(100 * n / sum(n), 1)) %>%
+    arrange(desc(n))
+
+  p <- ggplot(edu_tab, aes(x = reorder(level, n), y = n, fill = level,
+                            text = paste0(level, "\nN = ", fmt_n(n), " (", pct, "%)"))) +
+    geom_col(show.legend = FALSE, alpha = 0.85) +
+    scale_fill_viridis_d(option = "E") +
+    coord_flip() +
+    scale_y_continuous(labels = comma) +
+    labs(title = "Education Level Distribution", x = NULL, y = "N")
+
+  ggplotly(p, tooltip = "text")
+}
+```
+
+```{r marital-delivery}
+plots <- list()
+
+if (!is.na(V_MAR)) {
+  mar_tab <- df %>% filter(!is.na(.data[[V_MAR]])) %>%
+    count(level = .data[[V_MAR]], name = "n") %>% mutate(pct = round(100 * n / sum(n), 1))
+  plots$marital <- ggplot(mar_tab, aes(x = reorder(level, n), y = n, fill = level)) +
+    geom_col(show.legend = FALSE, alpha = 0.85) + scale_fill_viridis_d() +
+    coord_flip() + scale_y_continuous(labels = comma) +
+    labs(title = "Marital Status", x = NULL, y = "N")
+}
+
+if (!is.na(V_MODE)) {
+  mode_tab <- df %>% filter(!is.na(.data[[V_MODE]])) %>%
+    count(level = .data[[V_MODE]], name = "n") %>% mutate(pct = round(100 * n / sum(n), 1))
+  plots$delivery <- ggplot(mode_tab, aes(x = reorder(level, n), y = n, fill = level)) +
+    geom_col(show.legend = FALSE, alpha = 0.85) + scale_fill_brewer(palette = "Set2") +
+    coord_flip() + scale_y_continuous(labels = comma) +
+    labs(title = "Delivery Mode", x = NULL, y = "N")
+}
+
+if (length(plots) > 0) {
+  if (length(plots) == 2) {
+    plots$marital + plots$delivery + plot_layout(ncol = 2)
+  } else {
+    plots[[1]]
+  }
+}
+```
+
+<hr class="section-divider">
+
+# Cross-tabulations: Outcomes by Risk Factors {.tabset .tabset-fade}
+
+## SB by Maternal Age
+
+```{r sb-by-age}
+if (!is.na(V_SB) && !is.na(V_AGE)) {
+  d <- tibble(
+    sb  = to01(df[[V_SB]]),
+    age = safe_num(df[[V_AGE]])
+  ) %>%
+    filter(!is.na(sb), !is.na(age), age >= 10, age <= 60) %>%
+    mutate(age_cat = factor(case_when(
+      age < 18 ~ "<18", age < 20 ~ "18-19", age < 25 ~ "20-24",
+      age < 30 ~ "25-29", age < 35 ~ "30-34", age < 40 ~ "35-39", TRUE ~ "40+"
+    ), levels = c("<18", "18-19", "20-24", "25-29", "30-34", "35-39", "40+")))
+
+  tab <- d %>% group_by(age_cat) %>%
+    summarise(N = n(), SB = sum(sb == 1), SBR = rate_1000(SB, N), .groups = "drop")
+
+  p <- ggplot(tab, aes(x = age_cat, y = SBR, fill = SBR,
+                        text = paste0(age_cat, "\nSBR: ", SBR, " per 1,000\nN = ", fmt_n(N)))) +
+    geom_col(show.legend = FALSE, alpha = 0.85) +
+    scale_fill_gradient(low = "#fee090", high = "#d73027") +
+    labs(title = "Stillbirth Rate by Maternal Age", x = "Age Group", y = "SBR per 1,000")
+
+  ggplotly(p, tooltip = "text")
+}
+```
+
+## NND by Birthweight
+
+```{r nnd-by-bw}
+if (!is.na(V_NND) && !is.na(V_BW)) {
+  d <- tibble(
+    nnd = to01(df[[V_NND]]),
+    bw  = safe_num(df[[V_BW]])
+  ) %>%
+    filter(!is.na(nnd), !is.na(bw), bw >= 300, bw <= 6000) %>%
+    mutate(bw_cat = factor(case_when(
+      bw < 1000 ~ "<1000g", bw < 1500 ~ "1000-1499g",
+      bw < 2500 ~ "1500-2499g", bw < 4000 ~ "2500-3999g", TRUE ~ ">=4000g"
+    ), levels = c("<1000g", "1000-1499g", "1500-2499g", "2500-3999g", ">=4000g")))
+
+  tab <- d %>% group_by(bw_cat) %>%
+    summarise(N = n(), NND = sum(nnd == 1), NND_rate = rate_1000(NND, N), .groups = "drop")
+
+  p <- ggplot(tab, aes(x = bw_cat, y = NND_rate, fill = NND_rate,
+                        text = paste0(bw_cat, "\nNND rate: ", NND_rate, " per 1,000\nN = ", fmt_n(N)))) +
+    geom_col(show.legend = FALSE, alpha = 0.85) +
+    scale_fill_gradient(low = "#fee090", high = "#d73027") +
+    labs(title = "Neonatal Death Rate by Birthweight Category", x = "BW Category", y = "NND per 1,000")
+
+  ggplotly(p, tooltip = "text")
+}
+```
+
+## Outcomes by Education
+
+```{r outcomes-by-edu}
+if (!is.na(V_EDU)) {
+  outcomes_edu <- na.omit(c(V_SB, V_NND, V_PRE, V_LBW))
+
+  if (length(outcomes_edu) > 0) {
+    d <- df %>%
+      transmute(edu = as.factor(.data[[V_EDU]]),
+                across(all_of(outcomes_edu), ~ to01(.))) %>%
+      filter(!is.na(edu))
+
+    edu_prev <- d %>%
+      pivot_longer(cols = all_of(outcomes_edu), names_to = "outcome", values_to = "y") %>%
+      group_by(edu, outcome) %>%
+      summarise(n = sum(!is.na(y)), events = sum(y == 1, na.rm = TRUE),
+                rate_1000 = rate_1000(events, n), .groups = "drop")
+
+    p <- ggplot(edu_prev, aes(x = edu, y = rate_1000, fill = outcome,
+                               text = paste0(edu, " | ", outcome, "\nRate: ", rate_1000, " per 1,000"))) +
+      geom_col(position = position_dodge(width = 0.8), alpha = 0.85, width = 0.7) +
+      scale_fill_brewer(palette = "Set1") +
+      labs(title = "Outcome Rates by Education Level", x = "Education", y = "Rate per 1,000", fill = "Outcome") +
+      theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+    ggplotly(p, tooltip = "text")
+  }
+}
+```
+
+<hr class="section-divider">
+
+# Table 1: Descriptive Summary {.tabset .tabset-fade}
+
+## By Study Type
+
+```{r table1-by-type}
+vars_t1 <- unique(na.omit(c(
+  V_AGE, V_EDU, V_MAR, V_MODE, V_MULT,
+  V_GA, V_BW, sex_var, V_AP1, V_AP5,
+  V_SB, V_LB, V_NND, V_PRE, V_LBW, V_SGA
+)))
+
+if (length(vars_t1) > 0) {
+  df_t1 <- df %>% select(any_of(c("study_type", vars_t1)))
+
+  cont_v <- intersect(c(V_AGE, V_GA, V_BW, V_AP1, V_AP5, V_SBP, V_DBP), names(df_t1))
+  cat_v   <- setdiff(names(df_t1), c("study_type", cont_v))
+
+  if (length(cat_v) > 0) df_t1[cat_v] <- lapply(df_t1[cat_v], as.factor)
+  if (length(cont_v) > 0) df_t1[cont_v] <- lapply(df_t1[cont_v], function(x) safe_num(x))
+
+  tbl1 <- df_t1 %>%
+    tbl_summary(
+      by = study_type,
+      statistic = list(all_continuous() ~ "{median} ({p25}, {p75})", all_categorical() ~ "{n} ({p}%)"),
+      digits = list(all_continuous() ~ 1, all_categorical() ~ c(0, 1)),
+      missing = "ifany",
+      missing_text = "Missing"
+    ) %>%
+    add_overall(last = TRUE) %>%
+    bold_labels() %>%
+    modify_header(label ~ "**Characteristic**")
+
+  tbl1 %>%
+    as_gt() %>%
+    gt_lshtm(title = "Table 1. Descriptive Characteristics by Study Type",
+             subtitle = "SSA, 2010 onwards")
+}
+```
+
+## By Study Source
+
+```{r table1-by-study}
+if (!is.na(study_var) && length(vars_t1) > 0) {
+  df_t1s <- df %>% select(any_of(c(study_var, vars_t1)))
+
+  cont_v2 <- intersect(c(V_AGE, V_GA, V_BW, V_AP1, V_AP5, V_SBP, V_DBP), names(df_t1s))
+  cat_v2   <- setdiff(names(df_t1s), c(study_var, cont_v2))
+
+  if (length(cat_v2) > 0) df_t1s[cat_v2] <- lapply(df_t1s[cat_v2], as.factor)
+  if (length(cont_v2) > 0) df_t1s[cont_v2] <- lapply(df_t1s[cont_v2], function(x) safe_num(x))
+
+  tbl1s <- df_t1s %>%
+    tbl_summary(
+      by = all_of(study_var),
+      statistic = list(all_continuous() ~ "{median} ({p25}, {p75})", all_categorical() ~ "{n} ({p}%)"),
+      digits = list(all_continuous() ~ 1, all_categorical() ~ c(0, 1)),
+      missing = "ifany",
+      missing_text = "Missing"
+    ) %>%
+    add_overall(last = TRUE) %>%
+    bold_labels()
+
+  tbl1s %>%
+    as_gt() %>%
+    gt_lshtm(title = "Table 1. Descriptive Characteristics by Study Source")
+}
+```
+
+<hr class="section-divider">
+
+# Table 2: Bivariate Analysis — Covariates vs Outcomes {.tabset .tabset-fade}
+
+## Table 2a: Covariates by Stillbirth
+
+```{r table2-sb}
+vars_t2 <- unique(na.omit(c(
+  V_AGE, V_EDU, V_MAR, V_MODE, V_MULT,
+  V_GA, V_BW, sex_var
+)))
+
+if (!is.na(V_SB) && length(vars_t2) > 0) {
+  df_t2sb <- df %>%
+    select(any_of(c(V_SB, vars_t2))) %>%
+    mutate(!!V_SB := factor(to01(.data[[V_SB]]),
+                            levels = c(0, 1),
+                            labels = c("No SB", "Stillbirth"))) %>%
+    filter(!is.na(.data[[V_SB]]))
+
+  cont_t2 <- intersect(c(V_AGE, V_GA, V_BW), names(df_t2sb))
+  cat_t2  <- setdiff(names(df_t2sb), c(V_SB, cont_t2))
+
+  if (length(cat_t2) > 0) df_t2sb[cat_t2] <- lapply(df_t2sb[cat_t2], as.factor)
+  if (length(cont_t2) > 0) df_t2sb[cont_t2] <- lapply(df_t2sb[cont_t2], function(x) safe_num(x))
+
+  tbl2a <- df_t2sb %>%
+    tbl_summary(
+      by = all_of(V_SB),
+      statistic = list(all_continuous() ~ "{median} ({p25}, {p75})",
+                       all_categorical() ~ "{n} ({p}%)"),
+      digits = list(all_continuous() ~ 1, all_categorical() ~ c(0, 1)),
+      missing = "ifany",
+      missing_text = "Missing"
+    ) %>%
+    add_overall() %>%
+    add_n() %>%
+    add_p(test = list(all_continuous() ~ "wilcox.test",
+                      all_categorical() ~ "chisq.test")) %>%
+    bold_labels() %>%
+    bold_p(t = 0.05)
+
+  tbl2a %>%
+    as_gt() %>%
+    gt_lshtm(title = "Table 2a. Covariates by Stillbirth Status")
+}
+```
+
+## Table 2b: Covariates by Neonatal Death
+
+```{r table2-nnd}
+if (!is.na(V_NND) && length(vars_t2) > 0) {
+  df_t2nnd <- df %>%
+    select(any_of(c(V_NND, vars_t2))) %>%
+    mutate(!!V_NND := factor(to01(.data[[V_NND]]),
+                             levels = c(0, 1),
+                             labels = c("No NND", "Neonatal Death"))) %>%
+    filter(!is.na(.data[[V_NND]]))
+
+  cont_t2n <- intersect(c(V_AGE, V_GA, V_BW), names(df_t2nnd))
+  cat_t2n  <- setdiff(names(df_t2nnd), c(V_NND, cont_t2n))
+
+  if (length(cat_t2n) > 0) df_t2nnd[cat_t2n] <- lapply(df_t2nnd[cat_t2n], as.factor)
+  if (length(cont_t2n) > 0) df_t2nnd[cont_t2n] <- lapply(df_t2nnd[cont_t2n], function(x) safe_num(x))
+
+  tbl2b <- df_t2nnd %>%
+    tbl_summary(
+      by = all_of(V_NND),
+      statistic = list(all_continuous() ~ "{median} ({p25}, {p75})",
+                       all_categorical() ~ "{n} ({p}%)"),
+      digits = list(all_continuous() ~ 1, all_categorical() ~ c(0, 1)),
+      missing = "ifany",
+      missing_text = "Missing"
+    ) %>%
+    add_overall() %>%
+    add_n() %>%
+    add_p(test = list(all_continuous() ~ "wilcox.test",
+                      all_categorical() ~ "chisq.test")) %>%
+    bold_labels() %>%
+    bold_p(t = 0.05)
+
+  tbl2b %>%
+    as_gt() %>%
+    gt_lshtm(title = "Table 2b. Covariates by Neonatal Death Status")
+}
+```
+
+<hr class="section-divider">
+
+# Table 3: Covariates by Individual Study {.tabset .tabset-fade}
+
+## Full Table
+
+```{r table3-by-study}
+vars_t3 <- unique(na.omit(c(
+  V_AGE, V_EDU, V_MAR, V_MODE, V_MULT,
+  V_GA, V_BW, sex_var, V_SBP, V_DBP, V_AP1, V_AP5
+)))
+
+if (!is.na(study_var) && length(vars_t3) > 0) {
+  df_t3 <- df %>% select(any_of(c(study_var, vars_t3)))
+
+  cont_t3 <- intersect(c(V_AGE, V_GA, V_BW, V_AP1, V_AP5, V_SBP, V_DBP), names(df_t3))
+  cat_t3  <- setdiff(names(df_t3), c(study_var, cont_t3))
+
+  if (length(cat_t3) > 0) df_t3[cat_t3] <- lapply(df_t3[cat_t3], as.factor)
+  if (length(cont_t3) > 0) df_t3[cont_t3] <- lapply(df_t3[cont_t3], function(x) safe_num(x))
+
+  tbl3 <- df_t3 %>%
+    tbl_summary(
+      by = all_of(study_var),
+      statistic = list(all_continuous() ~ "{median} ({p25}, {p75})",
+                       all_categorical() ~ "{n} ({p}%)"),
+      digits = list(all_continuous() ~ 1, all_categorical() ~ c(0, 1)),
+      missing = "ifany",
+      missing_text = "Missing"
+    ) %>%
+    add_overall(last = TRUE) %>%
+    add_n() %>%
+    add_p(test = list(all_continuous() ~ "kruskal.test",
+                      all_categorical() ~ "chisq.test")) %>%
+    bold_labels() %>%
+    bold_p(t = 0.05)
+
+  tbl3 %>%
+    as_gt() %>%
+    gt_lshtm(title = "Table 3. Covariate Profile by Study")
+}
+```
+
+<hr class="section-divider">
+
+# Covariate Summary by Study {.tabset .tabset-fade}
+
+## Covariate Availability Heatmap
+
+```{r covariate-availability, fig.height=8, fig.width=12}
+if (!is.na(study_var)) {
+  # Key covariates for modeling
+  key_covariates <- unique(na.omit(c(
+    V_AGE, V_EDU, V_MAR, V_MODE, V_MULT, V_GA, V_BW,
+    sex_var, V_AP1, V_AP5, V_SBP, V_DBP,
+    V_SB, V_NND, V_PRE, V_LBW
+  )))
+  key_covariates <- intersect(key_covariates, names(df))
+
+  if (length(key_covariates) > 0) {
+    cov_avail <- df %>%
+      group_by(study = .data[[study_var]]) %>%
+      summarise(across(all_of(key_covariates), ~ round(100 * mean(!is.na(.)), 1)),
+                .groups = "drop")
+
+    cov_long <- cov_avail %>%
+      pivot_longer(-study, names_to = "variable", values_to = "pct_available")
+
+    p <- ggplot(cov_long, aes(x = study, y = variable, fill = pct_available,
+                               text = paste0(variable, "\n", study, "\n", pct_available, "% available"))) +
+      geom_tile(color = "white", linewidth = 0.5) +
+      geom_text(aes(label = paste0(round(pct_available), "%")), size = 2.8, color = "grey20") +
+      scale_fill_gradientn(
+        colours = c("#d73027", "#fc8d59", "#fee090", "#91bfdb", "#4575b4"),
+        values = scales::rescale(c(0, 25, 50, 75, 100)),
+        limits = c(0, 100), name = "% Available"
+      ) +
+      labs(title = "Key Covariate Availability by Study",
+           subtitle = "Heatmap of data completeness for candidate modeling variables",
+           x = NULL, y = NULL) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+            axis.text.y = element_text(size = 9),
+            axis.line = element_blank())
+
+    p
+  }
+}
+```
+
+## Continuous Covariates by Study
+
+```{r covariate-stats-by-study}
+if (!is.na(study_var)) {
+  cont_covs <- intersect(
+    unique(na.omit(c(V_AGE, V_GA, V_BW, V_AP1, V_AP5, V_SBP, V_DBP))),
+    names(df)
+  )
+
+  if (length(cont_covs) > 0) {
+    cov_stats <- df %>%
+      group_by(study = .data[[study_var]]) %>%
+      summarise(
+        across(all_of(cont_covs), list(
+          median = ~ round(median(safe_num(.), na.rm = TRUE), 1),
+          iqr    = ~ round(IQR(safe_num(.), na.rm = TRUE), 1),
+          n      = ~ sum(!is.na(.))
+        ), .names = "{.col}__{.fn}"),
+        .groups = "drop"
+      )
+
+    # Reshape for display
+    cov_stats_long <- cov_stats %>%
+      pivot_longer(-study, names_to = "var_stat", values_to = "value") %>%
+      separate(var_stat, into = c("variable", "stat"), sep = "__") %>%
+      pivot_wider(names_from = stat, values_from = value) %>%
+      mutate(summary = paste0(median, " (IQR: ", iqr, ") [n=", fmt_n(n), "]")) %>%
+      select(study, variable, summary) %>%
+      pivot_wider(names_from = study, values_from = summary)
+
+    cov_stats_long %>%
+      gt() %>%
+      cols_label(variable = "Variable") %>%
+      gt_lshtm(title = "Continuous Covariate Summary by Study",
+               subtitle = "Median (IQR) [n available]")
+  }
+}
+```
+
+<hr class="section-divider">
+
+# Data Completeness & Quality {.tabset .tabset-fade}
+
+## Overall Missingness
+
+```{r missingness-overview}
+domains <- tibble(variable = names(df)) %>%
+  mutate(domain = case_when(
+    str_detect(variable, "^out_") ~ "Outcomes",
+    str_detect(variable, "^mat_") ~ "Maternal",
+    str_detect(variable, "^neo_") ~ "Neonatal",
+    str_detect(variable, "^env_") ~ "Environmental",
+    str_detect(variable, "^loc_") ~ "Location",
+    str_detect(variable, "^hh_")  ~ "Household",
+    TRUE ~ "Other"
+  ))
+
+miss_tbl <- tibble(
+  variable    = names(df),
+  pct_missing = round(100 * colMeans(is.na(df)), 2),
+  n_missing   = colSums(is.na(df)),
+  n_total     = nrow(df)
+) %>%
+  left_join(domains, by = "variable") %>%
+  arrange(desc(pct_missing))
+
+comp_domain <- miss_tbl %>%
+  group_by(domain) %>%
+  summarise(
+    n_vars           = n(),
+    avg_missing_pct  = round(mean(pct_missing), 1),
+    median_missing   = round(median(pct_missing), 1),
+    vars_gt50_miss   = sum(pct_missing > 50),
+    vars_0_miss      = sum(pct_missing == 0),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(avg_missing_pct))
+
+p <- ggplot(comp_domain, aes(x = reorder(domain, avg_missing_pct), y = avg_missing_pct,
+                              fill = avg_missing_pct,
+                              text = paste0(domain, "\nAvg missing: ", avg_missing_pct, "%\nN vars: ", n_vars))) +
+  geom_col(show.legend = FALSE, alpha = 0.85) +
+  scale_fill_gradient(low = "#c7e9b4", high = "#d73027") +
+  coord_flip() +
+  labs(title = "Average Missingness by Variable Domain", x = NULL, y = "Avg % Missing")
+
+ggplotly(p, tooltip = "text")
+```
+
+```{r missingness-domain-table}
+comp_domain %>%
+  gt() %>%
+  cols_label(
+    domain = "Domain", n_vars = "# Variables",
+    avg_missing_pct = "Avg Missing %", median_missing = "Median Missing %",
+    vars_gt50_miss = ">50% Missing", vars_0_miss = "Complete"
+  ) %>%
+  data_color(columns = avg_missing_pct, palette = c("#e8f5e9", "#fff8e1", "#fce4ec"), domain = c(0, 100)) %>%
+  gt_lshtm(title = "Completeness Summary by Domain")
+```
+
+## Completeness Heatmap by Study
+
+```{r completeness-heatmap, fig.height=14, fig.width=16}
+if (!is.na(study_var)) {
+  admin_exclude <- na.omit(c(study_var, country_var, year_var, site_var, lat_var, lon_var))
+  vars_use <- setdiff(names(df), admin_exclude)
+
+  comp_study <- df %>%
+    group_by(study = .data[[study_var]]) %>%
+    summarise(across(all_of(vars_use), ~ round(100 * mean(!is.na(.)), 1)), .groups = "drop")
+
+  comp_long <- comp_study %>%
+    pivot_longer(-study, names_to = "variable", values_to = "pct_complete")
+
+  # Select top varying variables
+  var_rank <- comp_long %>%
+    group_by(variable) %>%
+    summarise(sd_comp = sd(pct_complete, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(sd_comp))
+
+  top_vars <- var_rank %>% slice_head(n = min(50, nrow(var_rank))) %>% pull(variable)
+
+  hm_mat <- comp_long %>%
+    filter(variable %in% top_vars) %>%
+    group_by(variable, study) %>%
+    summarise(pct_complete = mean(pct_complete, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = study, values_from = pct_complete) %>%
+    tibble::column_to_rownames("variable") %>%
+    as.matrix()
+
+  pheatmap(
+    hm_mat,
+    cluster_rows = TRUE, cluster_cols = TRUE,
+    main = "Completeness (%) by Study — Top 50 Most Variable",
+    fontsize_row = 7, fontsize_col = 9,
+    border_color = "white",
+    color = colorRampPalette(c("#d73027", "#fc8d59", "#fee090", "#91bfdb", "#4575b4"))(100),
+    breaks = seq(0, 100, length.out = 101),
+    display_numbers = FALSE
+  )
+}
+```
+
+## Completeness by Study Type
+
+```{r completeness-by-type-heatmap, fig.height=14, fig.width=10}
+vars_check <- setdiff(names(df), c(study_var, "study_type", "study_source_std"))
+
+comp_type <- df %>%
+  group_by(study_type) %>%
+  summarise(across(all_of(vars_check), ~ round(100 * mean(!is.na(.)), 1)), .groups = "drop")
+
+comp_type_long <- comp_type %>%
+  pivot_longer(-study_type, names_to = "variable", values_to = "pct_complete")
+
+type_var_rank <- comp_type_long %>%
+  group_by(variable) %>%
+  summarise(sd_comp = sd(pct_complete, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(sd_comp))
+
+top_vars_type <- type_var_rank %>% slice_head(n = min(60, nrow(type_var_rank))) %>% pull(variable)
+
+hm_type_mat <- comp_type_long %>%
+  filter(variable %in% top_vars_type) %>%
+  group_by(variable, study_type) %>%
+  summarise(pct_complete = mean(pct_complete, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = study_type, values_from = pct_complete) %>%
+  tibble::column_to_rownames("variable") %>%
+  as.matrix()
+
+pheatmap(
+  hm_type_mat,
+  cluster_rows = TRUE, cluster_cols = TRUE,
+  main = "Completeness (%) by Study Type — Top 60 Most Variable",
+  fontsize_row = 7, fontsize_col = 11,
+  border_color = "white",
+  color = colorRampPalette(c("#d73027", "#fc8d59", "#fee090", "#91bfdb", "#4575b4"))(100),
+  breaks = seq(0, 100, length.out = 101)
+)
+```
+
+## Variable Explorer
+
+```{r variable-explorer}
+var_inventory <- tibble(
+  Variable = names(df),
+  Class    = sapply(df, function(x) paste(class(x), collapse = "/")),
+  Type     = sapply(df, function(x) {
+    if (is.numeric(x)) "numeric"
+    else if (inherits(x, "Date")) "date"
+    else "categorical"
+  }),
+  N_Missing   = colSums(is.na(df)),
+  Pct_Missing = round(100 * colMeans(is.na(df)), 1),
+  N_Unique    = sapply(df, function(x) n_distinct(na.omit(x))),
+  Example     = sapply(df, function(x) paste(head(unique(na.omit(x)), 4), collapse = " | "))
+) %>%
+  left_join(domains, by = c("Variable" = "variable")) %>%
+  arrange(domain, Pct_Missing)
+
+datatable(
+  var_inventory,
+  filter = "top",
+  options = list(
+    pageLength = 25,
+    scrollX = TRUE,
+    dom = "Bfrtip",
+    autoWidth = TRUE
+  ),
+  class = "compact stripe hover",
+  caption = htmltools::tags$caption(style = "font-size:16px; font-weight:bold; color:#1a3a5c;",
+                                     "Interactive Variable Inventory")
+) %>%
+  formatStyle("Pct_Missing",
+              background = styleColorBar(c(0, 100), "#fc8d59"),
+              backgroundSize = "95% 80%",
+              backgroundRepeat = "no-repeat",
+              backgroundPosition = "center")
+```
+
+<hr class="section-divider">
+
+# Pre-Modeling Readiness Assessment {.tabset .tabset-fade}
+
+<div class="info-box">
+**Model readiness thresholds:**
+Global models require **>= `r params$global_threshold`%** completeness globally.
+Type-specific models require **>= `r params$type_threshold`%** in at least one study type.
+Study-specific models require **>= `r params$study_threshold`%** in at least one study.
+</div>
+
+## Model Readiness Classification
+
+```{r model-readiness}
+# Variable availability analysis
+if (!is.na(study_var)) {
+  avail_study <- comp_long %>%
+    group_by(variable) %>%
+    summarise(
+      max_study  = max(pct_complete, na.rm = TRUE),
+      n_studies_gt50 = sum(pct_complete >= 50),
+      .groups = "drop"
+    )
+
+  avail_type <- comp_type_long %>%
+    group_by(variable) %>%
+    summarise(
+      max_type = max(pct_complete, na.rm = TRUE),
+      n_types_gt50 = sum(pct_complete >= 50),
+      .groups = "drop"
+    )
+
+  global_comp <- tibble(
+    variable = names(df),
+    pct_global = round(100 * colMeans(is.na(df)), 1)
+  ) %>%
+    mutate(pct_global = 100 - pct_global)
+
+  model_ready <- global_comp %>%
+    left_join(avail_study, by = "variable") %>%
+    left_join(avail_type, by = "variable") %>%
+    left_join(domains, by = "variable") %>%
+    mutate(
+      readiness = case_when(
+        pct_global >= params$global_threshold ~ "Global model",
+        max_type >= params$type_threshold     ~ "Type-specific model",
+        max_study >= params$study_threshold   ~ "Study-specific model",
+        TRUE ~ "Descriptive only"
+      )
+    ) %>%
+    arrange(desc(readiness == "Global model"),
+            desc(readiness == "Type-specific model"),
+            desc(pct_global))
+
+  # Summary chart
+  ready_summary <- model_ready %>%
+    count(readiness, name = "n") %>%
+    mutate(pct = round(100 * n / sum(n), 1))
+
+  colors_ready <- c("Global model" = "#43a047", "Type-specific model" = "#1976d2",
+                     "Study-specific model" = "#ff9800", "Descriptive only" = "#e53935")
+
+  p <- ggplot(ready_summary, aes(x = reorder(readiness, n), y = n, fill = readiness,
+                                  text = paste0(readiness, "\n", n, " variables (", pct, "%)"))) +
+    geom_col(show.legend = FALSE, alpha = 0.85) +
+    scale_fill_manual(values = colors_ready) +
+    coord_flip() +
+    labs(title = "Variable Model Readiness Classification",
+         subtitle = paste0("Total: ", nrow(model_ready), " variables"),
+         x = NULL, y = "Number of Variables")
+
+  ggplotly(p, tooltip = "text")
+}
+```
+
+```{r model-readiness-table}
+if (exists("model_ready")) {
+  model_ready %>%
+    select(variable, domain, pct_global, max_study, max_type, n_studies_gt50, readiness) %>%
+    datatable(
+      filter = "top",
+      options = list(pageLength = 20, scrollX = TRUE, dom = "Bfrtip"),
+      class = "compact stripe hover",
+      caption = htmltools::tags$caption(style = "font-size:16px; font-weight:bold; color:#1a3a5c;",
+                                         "Model Readiness by Variable")
+    ) %>%
+    formatStyle("readiness",
+                backgroundColor = styleEqual(
+                  c("Global model", "Type-specific model", "Study-specific model", "Descriptive only"),
+                  c("#e8f5e9", "#e3f2fd", "#fff3e0", "#fce4ec")
+                ))
+}
+```
+
+## Candidate Variables for Modeling
+
+### Completeness by Domain
+
+```{r candidate-vars-domain-grid, fig.height=10, fig.width=12}
+if (exists("model_ready")) {
+  candidates <- model_ready %>%
+    filter(readiness != "Descriptive only") %>%
+    mutate(
+      tier = factor(readiness, levels = c("Global model", "Type-specific model", "Study-specific model"))
+    )
+
+  if (nrow(candidates) > 0) {
+    p <- ggplot(candidates, aes(x = reorder(variable, pct_global), y = pct_global, fill = tier)) +
+      geom_col(alpha = 0.85) +
+      scale_fill_manual(values = c("Global model" = "#43a047",
+                                    "Type-specific model" = "#1976d2",
+                                    "Study-specific model" = "#ff9800")) +
+      coord_flip() +
+      facet_wrap(~ domain, scales = "free_y", ncol = 2) +
+      geom_hline(yintercept = params$global_threshold, linetype = "dashed", color = "#d73027", linewidth = 0.4) +
+      labs(title = "Candidate Variable Completeness by Domain",
+           subtitle = "Coloured by readiness tier; dashed line = global threshold",
+           x = NULL, y = "% Complete", fill = "Readiness Tier") +
+      theme(axis.text.y = element_text(size = 7),
+            strip.text = element_text(face = "bold", size = 11))
+
+    p
+  }
+}
+```
+
+### Candidate Variable Table
+
+```{r candidate-vars-table}
+if (exists("model_ready") && exists("candidates") && nrow(candidates) > 0) {
+  cand_tbl <- candidates %>%
+    select(variable, domain, readiness, pct_global, max_type, max_study, n_studies_gt50) %>%
+    arrange(readiness, desc(pct_global))
+
+  cand_tbl %>%
+    gt(groupname_col = "readiness") %>%
+    cols_label(
+      variable = "Variable", domain = "Domain",
+      pct_global = "Global %", max_type = "Best Type %",
+      max_study = "Best Study %", n_studies_gt50 = "Studies >50%"
+    ) %>%
+    data_color(columns = pct_global, palette = c("#fce4ec", "#e8f5e9"), domain = c(0, 100)) %>%
+    data_color(columns = max_type, palette = c("#fce4ec", "#e8f5e9"), domain = c(0, 100)) %>%
+    gt_lshtm(title = "Candidate Variables for Predictive Modeling",
+             subtitle = "Grouped by readiness tier")
+}
+```
+
+### Top 50 Candidates (Lollipop)
+
+```{r candidate-lollipop, fig.height=12, fig.width=10}
+if (exists("candidates") && nrow(candidates) > 0) {
+  top50 <- candidates %>%
+    arrange(desc(pct_global)) %>%
+    slice_head(n = 50) %>%
+    mutate(variable = factor(variable, levels = rev(variable)))
+
+  p <- ggplot(top50, aes(x = variable, y = pct_global, color = tier)) +
+    geom_segment(aes(xend = variable, y = 0, yend = pct_global), linewidth = 0.8) +
+    geom_point(size = 3, alpha = 0.9) +
+    scale_color_manual(values = c("Global model" = "#43a047",
+                                   "Type-specific model" = "#1976d2",
+                                   "Study-specific model" = "#ff9800")) +
+    coord_flip() +
+    geom_hline(yintercept = params$global_threshold, linetype = "dashed", color = "#d73027", linewidth = 0.4) +
+    labs(title = "Top 50 Candidate Variables for Modeling",
+         subtitle = "Ranked by global completeness, coloured by readiness tier",
+         x = NULL, y = "% Complete Globally", color = "Readiness Tier") +
+    theme(axis.text.y = element_text(size = 8))
+
+  ggplotly(p, tooltip = c("x", "y", "color")) %>% layout(margin = list(l = 200))
+}
+```
+
+## Global Model Candidates
+
+```{r global-candidates}
+if (exists("model_ready")) {
+  global_vars <- model_ready %>%
+    filter(readiness == "Global model") %>%
+    arrange(desc(pct_global))
+
+  if (nrow(global_vars) > 0) {
+    p <- ggplot(global_vars %>% slice_head(n = 40),
+                aes(x = reorder(variable, pct_global), y = pct_global, fill = domain,
+                    text = paste0(variable, "\nCompleteness: ", pct_global, "%\nDomain: ", domain))) +
+      geom_col(alpha = 0.85) +
+      scale_fill_brewer(palette = "Set2") +
+      coord_flip() +
+      geom_hline(yintercept = params$global_threshold, linetype = "dashed", color = "#d73027") +
+      labs(title = paste0("Variables Ready for Global Models (>= ", params$global_threshold, "% complete)"),
+           subtitle = paste0(nrow(global_vars), " variables qualify"),
+           x = NULL, y = "% Complete", fill = "Domain")
+
+    ggplotly(p, tooltip = "text") %>% layout(margin = list(l = 200))
+  }
+}
+```
+
+## Sparse But Useful Variables
+
+```{r sparse-useful}
+if (exists("model_ready")) {
+  sparse_useful <- model_ready %>%
+    filter(pct_global < 10, (max_study >= 20 | max_type >= 20)) %>%
+    arrange(desc(max_study))
+
+  if (nrow(sparse_useful) > 0) {
+    cat('<div class="warning-box">\n')
+    cat(paste0("**", nrow(sparse_useful), " variables** have <10% global completeness but >=20% in at least one study/type. ",
+               "These are clinically useful for study-specific or type-specific models.\n"))
+    cat('</div>\n')
+
+    sparse_useful %>%
+      select(variable, domain, pct_global, max_study, max_type, n_studies_gt50) %>%
+      gt() %>%
+      data_color(columns = max_study, palette = c("#fce4ec", "#e8f5e9"), domain = c(0, 100)) %>%
+      gt_lshtm(title = "Sparse But Potentially Useful Variables")
+  }
+}
+```
+
+## Pre-Modeling Recommendations
+
+```{r recommendations, results='asis'}
+cat('<div class="success-box">\n')
+cat('<h4>Key Recommendations for Modeling</h4>\n')
+cat('<ol>\n')
+
+if (exists("global_vars")) {
+  cat(paste0('<li><strong>Global model:</strong> ', nrow(global_vars), ' variables with >=', params$global_threshold,
+             '% completeness are ready for a pooled multi-study model.</li>\n'))
+}
+
+if (exists("model_ready")) {
+  type_vars <- model_ready %>% filter(readiness == "Type-specific model")
+  study_vars_only <- model_ready %>% filter(readiness == "Study-specific model")
+  cat(paste0('<li><strong>Type-specific models:</strong> ', nrow(type_vars),
+             ' additional variables become available when modeling within study types (e.g., DHS-only or cohort-only models).</li>\n'))
+  cat(paste0('<li><strong>Study-specific models:</strong> ', nrow(study_vars_only),
+             ' more variables are usable within individual studies.</li>\n'))
+}
+
+cat('<li><strong>Missing data strategy:</strong> Consider multiple imputation (MICE) for variables with 10-40% missingness in the target modeling subset. Variables with >90% global missingness should only be used in study-specific models where they have adequate coverage.</li>\n')
+cat('<li><strong>Next steps:</strong> Define outcome (stillbirth, NND, or combined perinatal mortality), select candidate predictors from the global model pool, and evaluate collinearity before building predictive models.</li>\n')
+cat('</ol>\n')
+cat('</div>\n')
+```
+
+<hr class="section-divider">
+
+# Environmental Variables {.tabset .tabset-fade}
+
+## Distribution Overview
+
+```{r env-distributions, fig.height=10, eval=length(env_num) > 0}
+if (length(env_num) > 0) {
+  env_sample <- df %>% select(all_of(env_num)) %>% slice_sample(n = min(10000, nrow(df)))
+
+  env_long <- env_sample %>%
+    pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+    filter(!is.na(value))
+
+  p <- ggplot(env_long, aes(x = value, fill = variable)) +
+    geom_histogram(bins = 40, alpha = 0.7, show.legend = FALSE, color = "white") +
+    facet_wrap(~ variable, scales = "free", ncol = 4) +
+    scale_fill_viridis_d(option = "H") +
+    labs(title = "Environmental Variable Distributions", x = NULL, y = "Count") +
+    theme(strip.text = element_text(size = 8))
+
+  p
+}
+```
+
+## Correlation Matrix
+
+```{r env-correlation, fig.height=10, fig.width=10, eval=length(env_num) > 0}
+if (length(env_num) >= 3) {
+  env_complete <- df %>%
+    select(all_of(env_num)) %>%
+    select(where(~ sum(!is.na(.)) > 100))
+
+  if (ncol(env_complete) >= 3) {
+    cor_mat <- cor(env_complete, use = "pairwise.complete.obs")
+
+    corrplot(
+      cor_mat,
+      method = "color",
+      type = "upper",
+      tl.col = "#1a3a5c",
+      tl.cex = 0.7,
+      cl.cex = 0.8,
+      col = colorRampPalette(c("#d73027", "#fc8d59", "#fee090", "white", "#91bfdb", "#4575b4", "#253494"))(200),
+      addCoef.col = "black",
+      number.cex = 0.5,
+      title = "Environmental Variables Correlation Matrix",
+      mar = c(0, 0, 2, 0)
+    )
+  }
+}
+```
+
+<hr class="section-divider">
+
+# Session & Export Info
+
+```{r export-excel}
+# Export comprehensive Excel workbook
+xlsx_path <- file.path(params$output_dir, "LSHTM_Descriptive_Analysis.xlsx")
+wb <- createWorkbook()
+
+# Study distribution
+if (!is.na(study_var)) {
+  addWorksheet(wb, "study_distribution")
+  writeData(wb, "study_distribution", df %>% count(.data[[study_var]], study_type, name = "n") %>% arrange(desc(n)))
+}
+
+# Study overview
+if (exists("study_overview")) {
+  addWorksheet(wb, "study_overview")
+  writeData(wb, "study_overview", study_overview)
+}
+
+# Covariate availability by study
+if (exists("cov_avail")) {
+  addWorksheet(wb, "covariate_availability")
+  writeData(wb, "covariate_availability", cov_avail)
+}
+
+# Candidate variables
+if (exists("candidates") && nrow(candidates) > 0) {
+  addWorksheet(wb, "candidate_variables")
+  writeData(wb, "candidate_variables", candidates %>%
+    select(variable, domain, readiness, pct_global, max_type, max_study, n_studies_gt50))
+}
+
+# Variable inventory
+addWorksheet(wb, "variable_inventory")
+writeData(wb, "variable_inventory", var_inventory)
+
+# Model readiness
+if (exists("model_ready")) {
+  addWorksheet(wb, "model_readiness")
+  writeData(wb, "model_readiness", model_ready)
+}
+
+# Missingness
+addWorksheet(wb, "missingness")
+writeData(wb, "missingness", miss_tbl)
+
+# Outcome counts
+if (exists("out_counts")) {
+  addWorksheet(wb, "outcome_counts")
+  writeData(wb, "outcome_counts", out_counts)
+}
+
+# Bivariate Table 2a — SB
+if (exists("tbl2a")) {
+  t2a_df <- tbl2a %>% as_tibble()
+  addWorksheet(wb, "table2_sb")
+  writeData(wb, "table2_sb", t2a_df)
+}
+
+# Bivariate Table 2b — NND
+if (exists("tbl2b")) {
+  t2b_df <- tbl2b %>% as_tibble()
+  addWorksheet(wb, "table2_nnd")
+  writeData(wb, "table2_nnd", t2b_df)
+}
+
+saveWorkbook(wb, xlsx_path, overwrite = TRUE)
+```
+
+```{r pptx-export, fig.show='hide'}
+# ── Comprehensive PowerPoint with figures ──
+pptx_path <- file.path(params$output_dir,
+  "LSHTM_Descriptive_Presentation.pptx")
+fig_dir <- file.path(params$output_dir, "pptx_figures")
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Helper: save ggplot as png and return path
+save_fig <- function(p, name, w = 10, h = 6) {
+  path <- file.path(fig_dir, paste0(name, ".png"))
+  ggsave(path, plot = p, width = w, height = h,
+         dpi = 200, bg = "white")
+  path
+}
+
+ppt <- read_pptx()
+
+# ── Slide 1: Title ──
+ppt <- ppt %>%
+  add_slide(layout = "Title Slide",
+            master = "Office Theme") %>%
+  ph_with(
+    value = "Predicting Stillbirth & Neonatal Death in SSA",
+    location = ph_location_type(type = "ctrTitle")
+  ) %>%
+  ph_with(
+    value = paste0(
+      "Descriptive Analysis & Pre-Modeling Report\n",
+      "Audencio Victor | LSHTM\n",
+      format(Sys.Date(), "%d %B %Y")
+    ),
+    location = ph_location_type(type = "subTitle")
+  )
+
+# ── Slide 2: Executive Summary ──
+ppt <- ppt %>%
+  add_slide(layout = "Title and Content",
+            master = "Office Theme") %>%
+  ph_with(value = "Executive Summary",
+          location = ph_location_type(type = "title")) %>%
+  ph_with(value = paste0(
+    "Dataset: ", fmt_n(N_TOTAL), " records\n",
+    N_COUNTRIES, " SSA countries | ",
+    N_STUDIES, " studies | ", yr_range, "\n",
+    N_VARS, " variables\n\n",
+    if (!is.na(sbr)) paste0(
+      "SBR: ", sbr, " per 1,000 total births\n"
+    ) else "",
+    if (!is.na(nnd_rate)) paste0(
+      "NND: ", nnd_rate, " per 1,000 live births\n"
+    ) else "",
+    if (!is.na(pmr)) paste0(
+      "PMR: ", pmr, " per 1,000 total births\n"
+    ) else ""
+  ), location = ph_location_type(type = "body"))
+
+# ── Slide 3: Study Overview (N per study) ──
+if (exists("study_overview") && !is.na(study_var)) {
+  so <- study_overview %>%
+    mutate(study = factor(study, levels = study[order(N_records)]))
+  p_n_slide <- ggplot(so,
+    aes(x = study, y = N_records, fill = Type)) +
+    geom_col(alpha = 0.9, width = 0.7) +
+    geom_text(
+      aes(label = paste0(
+        fmt_n(N_records), " (", Pct_total, "%)"
+      )),
+      hjust = -0.05, size = 3.5, color = "#1a1a2e"
+    ) +
+    scale_fill_brewer(palette = "Set2") +
+    scale_y_continuous(
+      labels = comma,
+      expand = expansion(mult = c(0, 0.3))
+    ) +
+    coord_flip() +
+    labs(title = "Records per Study",
+         x = NULL, y = "N Records", fill = "Type")
+  fig3 <- save_fig(p_n_slide, "study_n", w = 10, h = 6)
+
+  ppt <- ppt %>%
+    add_slide(layout = "Title and Content",
+              master = "Office Theme") %>%
+    ph_with(value = "Study Sample Sizes",
+            location = ph_location_type(type = "title")) %>%
+    ph_with(
+      value = external_img(fig3, width = 9, height = 5.5),
+      location = ph_location(left = 0.5, top = 1.5,
+                              width = 9, height = 5.5)
+    )
+}
+
+# ── Slide 4: Geographic Map ──
+if (!is.na(country_var) && exists("ctry") &&
+    requireNamespace("rnaturalearth", quietly = TRUE)) {
+  africa <- rnaturalearth::ne_countries(
+    continent = "Africa", returnclass = "sf"
+  )
+  africa_map <- africa %>%
+    left_join(ctry, by = c("name" = "country")) %>%
+    mutate(n = ifelse(is.na(n) | n == 0, NA_real_, n))
+
+  p_map_slide <- ggplot(africa_map) +
+    geom_sf(aes(fill = log1p(n)),
+            color = "grey70", linewidth = 0.3) +
+    scale_fill_viridis_c(
+      option = "C",
+      name = "Records (log)",
+      labels = function(x) fmt_n(round(expm1(x))),
+      na.value = "white"
+    ) +
+    coord_sf(xlim = c(-20, 55), ylim = c(-40, 40)) +
+    labs(title = "Geographic Coverage — SSA") +
+    theme_void(base_size = 13) +
+    theme(
+      plot.title = element_text(
+        face = "bold", color = "#1a1a2e",
+        size = 14, hjust = 0.5
+      ),
+      legend.position = "bottom",
+      legend.key.width = unit(2, "cm")
+    )
+  fig4 <- save_fig(p_map_slide, "map", w = 8, h = 7)
+
+  ppt <- ppt %>%
+    add_slide(layout = "Title and Content",
+              master = "Office Theme") %>%
+    ph_with(value = "Geographic Distribution",
+            location = ph_location_type(type = "title")) %>%
+    ph_with(
+      value = external_img(fig4, width = 7, height = 5.5),
+      location = ph_location(left = 1.5, top = 1.5,
+                              width = 7, height = 5.5)
+    )
+}
+
+# ── Slide 5: Outcome Rates by Study ──
+if (exists("sb_by_study") && exists("nnd_by_study")) {
+  p_sb_s <- ggplot(
+    sb_by_study,
+    aes(x = reorder(study, SBR), y = SBR, fill = SBR)
+  ) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_gradient(low = "#fee090", high = "#d73027") +
+    coord_flip() +
+    labs(title = "A. Stillbirth Rate",
+         x = NULL, y = "SBR per 1,000")
+
+  p_nnd_s <- ggplot(
+    nnd_by_study,
+    aes(x = reorder(study, NND_rate), y = NND_rate,
+        fill = NND_rate)
+  ) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_gradient(low = "#e0f3f8", high = "#4575b4") +
+    coord_flip() +
+    labs(title = "B. Neonatal Death Rate",
+         x = NULL, y = "NND per 1,000 LB")
+
+  p_outcomes <- p_sb_s + p_nnd_s +
+    plot_annotation(
+      title = "Perinatal Outcome Rates by Study"
+    )
+  fig5 <- save_fig(p_outcomes, "outcomes_study",
+                    w = 12, h = 6)
+
+  ppt <- ppt %>%
+    add_slide(layout = "Title and Content",
+              master = "Office Theme") %>%
+    ph_with(value = "Outcome Rates by Study",
+            location = ph_location_type(type = "title")) %>%
+    ph_with(
+      value = external_img(fig5, width = 9, height = 5),
+      location = ph_location(left = 0.5, top = 1.5,
+                              width = 9, height = 5)
+    )
+}
+
+# ── Slide 6: Birth Characteristics ──
+if (exists("plots_dist") && length(plots_dist) >= 2) {
+  p_birth <- plots_dist$ga + plots_dist$bw +
+    plot_annotation(
+      title = "Birth Characteristic Distributions"
+    )
+  fig6 <- save_fig(p_birth, "birth_chars", w = 12, h = 5)
+
+  ppt <- ppt %>%
+    add_slide(layout = "Title and Content",
+              master = "Office Theme") %>%
+    ph_with(value = "Birth Characteristics",
+            location = ph_location_type(type = "title")) %>%
+    ph_with(
+      value = external_img(fig6, width = 9, height = 4.5),
+      location = ph_location(left = 0.5, top = 1.5,
+                              width = 9, height = 4.5)
+    )
+}
+
+# ── Slide 7: Ridgeline by Study ──
+if (exists("plots_ridge") && length(plots_ridge) >= 2) {
+  p_ridge <- plots_ridge$ga + plots_ridge$bw +
+    plot_annotation(
+      title = "GA & Birthweight by Study"
+    )
+  fig7 <- save_fig(p_ridge, "ridgeline", w = 12, h = 7)
+
+  ppt <- ppt %>%
+    add_slide(layout = "Title and Content",
+              master = "Office Theme") %>%
+    ph_with(value = "GA & Birthweight by Study",
+            location = ph_location_type(type = "title")) %>%
+    ph_with(
+      value = external_img(fig7, width = 9, height = 5.5),
+      location = ph_location(left = 0.5, top = 1.5,
+                              width = 9, height = 5.5)
+    )
+}
+
+# ── Slide 8: Model Readiness ──
+if (exists("model_ready")) {
+  ready_counts <- model_ready %>% count(readiness, name = "n")
+  colors_ready <- c(
+    "Global model" = "#43a047",
+    "Type-specific model" = "#1976d2",
+    "Study-specific model" = "#ff9800",
+    "Descriptive only" = "#e53935"
+  )
+  p_ready <- ggplot(
+    ready_counts,
+    aes(x = reorder(readiness, n), y = n,
+        fill = readiness)
+  ) +
+    geom_col(show.legend = FALSE, alpha = 0.9) +
+    geom_text(
+      aes(label = paste0(n, " vars")),
+      hjust = -0.1, size = 4, color = "#1a1a2e"
+    ) +
+    scale_fill_manual(values = colors_ready) +
+    scale_y_continuous(
+      expand = expansion(mult = c(0, 0.2))
+    ) +
+    coord_flip() +
+    labs(title = "Variable Readiness for Modeling",
+         subtitle = paste0(
+           "Thresholds: Global>=",
+           params$global_threshold,
+           "% | Type>=", params$type_threshold,
+           "% | Study>=", params$study_threshold, "%"
+         ),
+         x = NULL, y = "N Variables")
+  fig8 <- save_fig(p_ready, "readiness", w = 10, h = 5)
+
+  ppt <- ppt %>%
+    add_slide(layout = "Title and Content",
+              master = "Office Theme") %>%
+    ph_with(value = "Pre-Modeling Readiness",
+            location = ph_location_type(type = "title")) %>%
+    ph_with(
+      value = external_img(fig8, width = 9, height = 5),
+      location = ph_location(left = 0.5, top = 1.5,
+                              width = 9, height = 5)
+    )
+}
+
+# ── Slide 9: Candidate Variables Lollipop ──
+if (exists("candidates") && nrow(candidates) > 0) {
+  top30 <- candidates %>%
+    arrange(desc(pct_global)) %>%
+    slice_head(n = 30) %>%
+    mutate(
+      variable = factor(variable, levels = rev(variable)),
+      tier = factor(readiness, levels = c(
+        "Global model", "Type-specific model",
+        "Study-specific model"
+      ))
+    )
+  p_cand <- ggplot(
+    top30,
+    aes(x = variable, y = pct_global, color = tier)
+  ) +
+    geom_segment(
+      aes(xend = variable, y = 0, yend = pct_global),
+      linewidth = 0.7
+    ) +
+    geom_point(size = 2.5) +
+    scale_color_manual(values = c(
+      "Global model" = "#43a047",
+      "Type-specific model" = "#1976d2",
+      "Study-specific model" = "#ff9800"
+    )) +
+    coord_flip() +
+    labs(title = "Top 30 Candidate Variables",
+         x = NULL, y = "% Complete",
+         color = "Tier")
+  fig9 <- save_fig(p_cand, "candidates", w = 10, h = 8)
+
+  ppt <- ppt %>%
+    add_slide(layout = "Title and Content",
+              master = "Office Theme") %>%
+    ph_with(value = "Candidate Variables for Modeling",
+            location = ph_location_type(type = "title")) %>%
+    ph_with(
+      value = external_img(fig9, width = 9, height = 5.5),
+      location = ph_location(left = 0.5, top = 1.5,
+                              width = 9, height = 5.5)
+    )
+}
+
+# ── Slide 10: Covariate Availability Heatmap ──
+if (exists("cov_long") && nrow(cov_long) > 0) {
+  p_heatmap_slide <- ggplot(cov_long, aes(x = study, y = variable, fill = pct_available)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = paste0(round(pct_available), "%")), size = 2.5, color = "grey20") +
+    scale_fill_gradientn(
+      colours = c("#d73027", "#fc8d59", "#fee090", "#91bfdb", "#4575b4"),
+      values = scales::rescale(c(0, 25, 50, 75, 100)),
+      limits = c(0, 100), name = "% Available"
+    ) +
+    labs(title = "Covariate Availability by Study", x = NULL, y = NULL) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          axis.text.y = element_text(size = 8))
+  fig_heat <- save_fig(p_heatmap_slide, "cov_heatmap", w = 12, h = 8)
+
+  ppt <- ppt %>%
+    add_slide(layout = "Title and Content", master = "Office Theme") %>%
+    ph_with(value = "Covariate Availability Heatmap",
+            location = ph_location_type(type = "title")) %>%
+    ph_with(value = external_img(fig_heat, width = 9, height = 5.5),
+            location = ph_location(left = 0.5, top = 1.5, width = 9, height = 5.5))
+}
+
+# ── Slide 11: SB by Age + NND by BW ──
+sb_age_exists <- !is.na(V_SB) && !is.na(V_AGE)
+nnd_bw_exists <- !is.na(V_NND) && !is.na(V_BW)
+
+if (sb_age_exists || nnd_bw_exists) {
+  cross_plots <- list()
+
+  if (sb_age_exists) {
+    d_sb <- tibble(sb = to01(df[[V_SB]]), age = safe_num(df[[V_AGE]])) %>%
+      filter(!is.na(sb), !is.na(age), age >= 10, age <= 60) %>%
+      mutate(age_cat = factor(case_when(
+        age < 18 ~ "<18", age < 20 ~ "18-19", age < 25 ~ "20-24",
+        age < 30 ~ "25-29", age < 35 ~ "30-34", age < 40 ~ "35-39", TRUE ~ "40+"
+      ), levels = c("<18", "18-19", "20-24", "25-29", "30-34", "35-39", "40+")))
+
+    tab_sb <- d_sb %>% group_by(age_cat) %>%
+      summarise(N = n(), SB = sum(sb == 1), SBR = rate_1000(SB, N), .groups = "drop")
+
+    cross_plots$sb <- ggplot(tab_sb, aes(x = age_cat, y = SBR, fill = SBR)) +
+      geom_col(show.legend = FALSE, alpha = 0.85) +
+      scale_fill_gradient(low = "#fee090", high = "#d73027") +
+      labs(title = "A. Stillbirth Rate by Maternal Age", x = "Age Group", y = "SBR per 1,000")
+  }
+
+  if (nnd_bw_exists) {
+    d_nnd <- tibble(nnd = to01(df[[V_NND]]), bw = safe_num(df[[V_BW]])) %>%
+      filter(!is.na(nnd), !is.na(bw), bw >= 300, bw <= 6000) %>%
+      mutate(bw_cat = factor(case_when(
+        bw < 1000 ~ "<1000g", bw < 1500 ~ "1000-1499g",
+        bw < 2500 ~ "1500-2499g", bw < 4000 ~ "2500-3999g", TRUE ~ ">=4000g"
+      ), levels = c("<1000g", "1000-1499g", "1500-2499g", "2500-3999g", ">=4000g")))
+
+    tab_nnd <- d_nnd %>% group_by(bw_cat) %>%
+      summarise(N = n(), NND = sum(nnd == 1), NND_rate = rate_1000(NND, N), .groups = "drop")
+
+    cross_plots$nnd <- ggplot(tab_nnd, aes(x = bw_cat, y = NND_rate, fill = NND_rate)) +
+      geom_col(show.legend = FALSE, alpha = 0.85) +
+      scale_fill_gradient(low = "#e0f3f8", high = "#4575b4") +
+      labs(title = "B. NND Rate by Birthweight", x = "BW Category", y = "NND per 1,000 LB")
+  }
+
+  if (length(cross_plots) == 2) {
+    p_cross <- cross_plots$sb + cross_plots$nnd +
+      plot_annotation(title = "Outcome Rates by Risk Factor")
+  } else {
+    p_cross <- cross_plots[[1]] + plot_annotation(title = "Outcome Rate by Risk Factor")
+  }
+  fig_cross <- save_fig(p_cross, "cross_tabs", w = 12, h = 5)
+
+  ppt <- ppt %>%
+    add_slide(layout = "Title and Content", master = "Office Theme") %>%
+    ph_with(value = "Outcomes by Risk Factor",
+            location = ph_location_type(type = "title")) %>%
+    ph_with(value = external_img(fig_cross, width = 9, height = 5),
+            location = ph_location(left = 0.5, top = 1.5, width = 9, height = 5))
+}
+
+# ── Slide 12: Summary / Conclusions ──
+ppt <- ppt %>%
+  add_slide(layout = "Title and Content", master = "Office Theme") %>%
+  ph_with(value = "Key Findings",
+          location = ph_location_type(type = "title")) %>%
+  ph_with(value = paste0(
+    "Dataset: ", fmt_n(N_TOTAL), " records from ",
+    N_COUNTRIES, " SSA countries, ", N_STUDIES, " studies\n\n",
+    if (!is.na(sbr)) paste0("Stillbirth rate: ", sbr, " per 1,000 total births\n") else "",
+    if (!is.na(nnd_rate)) paste0("Neonatal death rate: ", nnd_rate, " per 1,000 live births\n") else "",
+    "\nKey observations:\n",
+    "- DHS contributes ~85% of records\n",
+    "- Significant heterogeneity across studies\n",
+    "- Maternal age, birthweight, and GA strongly associated with outcomes\n",
+    "- Missing data patterns vary by study source\n\n",
+    "Next steps: variable selection, collinearity assessment, predictive modeling"
+  ), location = ph_location_type(type = "body"))
+
+# ── Slide 13: Key Recommendations ──
+ppt <- ppt %>%
+  add_slide(layout = "Title and Content",
+            master = "Office Theme") %>%
+  ph_with(value = "Key Recommendations",
+          location = ph_location_type(type = "title")) %>%
+  ph_with(value = paste0(
+    "1. Global model: ", if (exists("global_vars"))
+      nrow(global_vars) else "?",
+    " variables with >=", params$global_threshold,
+    "% completeness\n\n",
+    "2. Consider median (IQR) for clinical summaries ",
+    "(skewed distributions)\n\n",
+    "3. Missing data: MICE for 10-40% missingness; ",
+    "study-specific models for sparse variables\n\n",
+    "4. Next: define outcome, select predictors, ",
+    "evaluate collinearity\n\n",
+    "5. DHS dominates (~85%): consider sensitivity ",
+    "analyses excluding DHS"
+  ), location = ph_location_type(type = "body"))
+
+print(ppt, target = pptx_path)
+
+# Clean up temp figures
+unlink(fig_dir, recursive = TRUE)
+```
+
+<div class="success-box">
+**Outputs exported:**
+
+- Excel workbook: `r file.path(params$output_dir, "LSHTM_Descriptive_Analysis.xlsx")`
+- PowerPoint: `r file.path(params$output_dir, "LSHTM_Descriptive_Presentation.pptx")`
+</div>
+
+```{r session-info}
+cat("R version:", R.version.string, "\n")
+cat("Date:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat("Platform:", sessionInfo()$platform, "\n\n")
+cat("Key packages:\n")
+pkgs <- c("dplyr", "ggplot2", "plotly", "gtsummary", "gt", "DT", "pheatmap")
+for (p in pkgs) {
+  cat(sprintf("  %s: %s\n", p, as.character(packageVersion(p))))
+}
+```
+
+---
+
+<div style="text-align:center; padding:30px; color:#8e99a4; font-size:0.9em;">
+  <strong>LSHTM Perinatal Outcomes Prediction Project</strong><br>
+  Audencio Victor | London School of Hygiene & Tropical Medicine<br>
+  Report generated on `r format(Sys.Date(), '%d %B %Y')` with R `r R.version.string`
+</div>
