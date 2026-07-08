@@ -10,7 +10,7 @@
 
 <h1 align="center">Predictive Modelling for Stillbirths &amp; Neonatal Deaths in Sub-Saharan Africa</h1>
 
-<p align="center"><i>Harmonising seven studies · 3.2M births · 33 countries — from raw data to leak-audited, MLflow-tracked prediction.</i></p>
+<p align="center"><i>Harmonising seven studies · ~6M harmonised records · 33 countries — from raw data to leak-audited, MLflow-tracked prediction.</i></p>
 
 <p align="center">
   <a href="https://doi.org/10.12688/wellcomeopenres.25574.1"><img src="https://img.shields.io/badge/DOI-10.12688%2Fwellcomeopenres.25574.1-blue?style=flat-square" alt="DOI"></a>
@@ -26,9 +26,11 @@ Reproducible analytical pipeline for data harmonisation and predictive modelling
 ## At a Glance
 
 ```
- 3,210,530 births   |   33 SSA countries   |   7 studies   |   2010-2024
-      141 variables  |  13 harmonisation domains  |  v10.17 unified dataset
+ 5,996,390 harmonised records  ->  3,210,530 SSA births (2010-2024 analytic cohort)
+   7 studies  |  33 SSA countries  |  141 variables  |  13 harmonisation domains  |  v10.17
 ```
+
+> The full **harmonised dataset is ~6M records** (all sources, all years). Applying the SSA + 2010-2024 + valid-birth filters yields the **3.21M analytic cohort** used for the rates and modelling below.
 
 ### Perinatal Outcome Rates
 
