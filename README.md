@@ -221,7 +221,28 @@ Discrimination (AUROC) across 8 models × 2 arms × 3 outcomes, with 1000× clus
 | **Survey** (DHS + EN-INDEPTH) | 0.66 | 0.66 | 0.64 |
 | **Clinical** (facility cohorts) | 0.75 | **0.77** | 0.73 |
 
-Best model = gradient boosting (XGBoost / CatBoost). **External validation:** clinical boosting up to **0.85** (India + Pakistan). Operating-point metrics (Se, Sp, PPV, NPV, F1, F2, MCC at the Youden threshold), per-country AUROC, and fairness by subgroup are in [`ml_pipeline/tables/`](ml_pipeline/tables/); all figures in [`ml_pipeline/figures/`](ml_pipeline/figures/).
+Best model = gradient boosting (XGBoost / CatBoost). **External validation:** clinical boosting up to **0.85** (India + Pakistan). Operating-point metrics (Se, Sp, PPV, NPV, F1, F2, MCC at the Youden threshold), per-country AUROC, and fairness by subgroup are in [`ml_pipeline/tables/`](ml_pipeline/tables/).
+
+**Model performance at a glance**
+
+<table>
+  <tr>
+    <td width="50%"><img src="ml_pipeline/figures/F2_roc_curves.png" alt="ROC curves"></td>
+    <td width="50%"><img src="ml_pipeline/figures/F3_pr_curves.png" alt="Precision-Recall curves"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>ROC curves</b> — discrimination across models</td>
+    <td align="center"><b>Precision–Recall</b> — performance at low prevalence</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="ml_pipeline/figures/F1_calibration_plots.png" alt="Calibration"></td>
+    <td width="50%"><img src="ml_pipeline/figures/F5_shap_clinical_stillbirth_xgboost.png" alt="SHAP importance"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Calibration</b> — predicted vs observed risk (recalibrated)</td>
+    <td align="center"><b>SHAP</b> — what drives predictions (clinical stillbirth)</td>
+  </tr>
+</table>
 
 See [`ml_pipeline/README.md`](ml_pipeline/README.md) for full model specifications and usage.
 
