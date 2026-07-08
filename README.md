@@ -8,14 +8,18 @@
   <img src="https://img.shields.io/badge/Phase%203%20Modelling-In%20Progress-F97316?style=for-the-badge" alt="Modelling status">
 </p>
 
-# Predictive Modelling for Stillbirths and Neonatal Deaths in Sub-Saharan Africa
+<h1 align="center">Predictive Modelling for Stillbirths &amp; Neonatal Deaths in Sub-Saharan Africa</h1>
 
-Reproducible analytical pipeline for data harmonisation and predictive modelling across seven contributing studies (ALERT, EN-INDEPTH, PTBi, PRECISE, WHOMCS, NCOPS, DHS). Implements a 13-domain harmonisation framework and classical, machine learning and AI modelling approaches. Associated with a Wellcome Accelerator Award at the London School of Hygiene and Tropical Medicine.
+<p align="center"><i>Harmonising seven studies · 3.2M births · 33 countries — from raw data to leak-audited, MLflow-tracked prediction.</i></p>
 
 <p align="center">
   <a href="https://doi.org/10.12688/wellcomeopenres.25574.1"><img src="https://img.shields.io/badge/DOI-10.12688%2Fwellcomeopenres.25574.1-blue?style=flat-square" alt="DOI"></a>
   <a href="https://osf.io/ptf7x/overview"><img src="https://img.shields.io/badge/OSF-ptf7x-lightblue?style=flat-square&logo=osf" alt="OSF"></a>
 </p>
+
+Reproducible analytical pipeline for data harmonisation and predictive modelling across seven contributing studies (ALERT, EN-INDEPTH, PTBi, PRECISE, WHOMCS, NCOPS, DHS). Implements a 13-domain harmonisation framework and classical, machine-learning and AI modelling approaches. Associated with a Wellcome Accelerator Award at the London School of Hygiene &amp; Tropical Medicine.
+
+> **Contents** — [At a Glance](#at-a-glance) · [Project Phases](#project-phases) · [Phase 1 · Harmonisation](#phase-1-data-harmonisation-pipeline) · [Phase 2 · Descriptive](#phase-2-descriptive-analysis-pre-modeling) · [Phase 3 · Modelling](#phase-3-predictive-modelling) · [Version History](#version-history) · [Authors](#authors)
 
 ---
 
@@ -71,7 +75,12 @@ graph LR
 
 The pipeline produces a unified analytical dataset (v10.17) from six prospective cohort studies and national DHS surveys across Sub-Saharan Africa, linked with geospatial environmental exposures. Scripts are numbered in execution order and should be run sequentially from the project root directory.
 
-### Execution order
+<details>
+<summary><b>Execution order · utilities · legacy</b> (11 numbered steps — click to expand)</summary>
+
+<br>
+
+**Execution order**
 
 | Step | Script | Description |
 |------|--------|-------------|
@@ -87,7 +96,7 @@ The pipeline produces a unified analytical dataset (v10.17) from six prospective
 | 10 | `pipeline/10_generate_documentation.R` | Generate documentation suite: DHS variable mapping, harmonisation documentation, pipeline workflow, data dictionary (4 Word/Excel files). |
 | 11 | `pipeline/11_unified_dataset_analysis_v10.17.Rmd` | Comprehensive exploratory analysis report (HTML output). |
 
-### Utilities
+**Utilities**
 
 | Script | Description |
 |--------|-------------|
@@ -97,11 +106,13 @@ The pipeline produces a unified analytical dataset (v10.17) from six prospective
 | `utilities/export_missingness_report.R` | Generate variable-level missingness report (XLSX) for v10.17 |
 | `utilities/compare_v15_v17.R` | Validation: compare v10.15 vs v10.17 (GA, environmental data, column counts) |
 
-### Legacy
+**Legacy**
 
 | Script | Description |
 |--------|-------------|
 | `legacy/outcomes_harmonisation_v7.do` | Stata do-file for outcomes variable harmonisation (historical reference) |
+
+</details>
 
 ---
 
@@ -137,9 +148,11 @@ See [`descriptive_analysis/README.md`](descriptive_analysis/README.md) for full 
 
 ---
 
-## Phase 3: Predictive Modelling &nbsp;·&nbsp; 🚧 In Progress
+## Phase 3: Predictive Modelling
 
-Classical, ensemble and neural-network models for **stillbirth** and **neonatal death** prediction, built on the harmonised unified dataset. The pipeline is leak-audited, cross-validated, calibrated, and fully **tracked with MLflow** for reproducible experiments. Implementation in Python under [`ml_pipeline/`](ml_pipeline/).
+![status](https://img.shields.io/badge/status-in%20progress-F97316?style=flat-square) ![python](https://img.shields.io/badge/python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white) ![mlflow](https://img.shields.io/badge/tracking-MLflow-0194E2?style=flat-square&logo=mlflow&logoColor=white)
+
+Classical, ensemble and neural-network models for **stillbirth**, **neonatal** and **perinatal death** prediction, built on the harmonised unified dataset. The pipeline is leak-audited, cross-validated, calibrated, and fully **tracked with MLflow** for reproducible experiments. Implementation in Python under [`ml_pipeline/`](ml_pipeline/).
 
 ### Models (8 algorithms)
 
@@ -182,7 +195,7 @@ Every run is logged to **MLflow** — parameters, metrics (AUROC, AUPRC, Brier, 
 
 ```bash
 cd ml_pipeline
-conda run -n base python run_modeling_pipeline.py     # runs all models × scenarios, logs to MLflow
+conda run -n base python run_modeling_pipeline.py     # all models x arms x outcomes, logs to MLflow
 python generate_figures_tables.py                     # figures + tables from the tracked runs
 mlflow ui                                             # inspect runs at http://localhost:5000
 ```
