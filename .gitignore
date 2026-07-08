@@ -51,3 +51,7 @@ __pycache__/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Aggregate result tables (shareable, no microdata) — override global *.csv ignore
+!ml_pipeline/tables/
+!ml_pipeline/tables/*.csv

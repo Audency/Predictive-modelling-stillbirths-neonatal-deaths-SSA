@@ -1,0 +1,7 @@
+arm,outcome,N_train,N_test,cases_train,cases_test
+clinical,neonatal,174629,87315,2232,1113
+clinical,perinatal,200807,100404,11894,5922
+clinical,stillbirth,200807,100404,9657,4814
+survey,neonatal,503974,249837,13448,6676
+survey,perinatal,510296,255007,16361,8271
+survey,stillbirth,510729,254574,7610,3882

@@ -141,22 +141,30 @@ See [`descriptive_analysis/README.md`](descriptive_analysis/README.md) for full 
 
 Classical, ensemble and neural-network models for **stillbirth** and **neonatal death** prediction, built on the harmonised unified dataset. The pipeline is leak-audited, cross-validated, calibrated, and fully **tracked with MLflow** for reproducible experiments. Implementation in Python under [`ml_pipeline/`](ml_pipeline/).
 
-### Models
+### Models (8 algorithms)
 
 | Algorithm | Type |
 |---|---|
 | Logistic Regression (L2) | Baseline (interpretable) |
+| Gaussian Naive Bayes | Probabilistic baseline |
+| Linear SVM (SGD, modified-Huber) | Margin-based |
 | Random Forest | Ensemble |
 | XGBoost · LightGBM · CatBoost | Gradient boosting |
 | MLP (Optuna-tuned) | Neural network |
 
-### Clinical scenarios (progressive availability)
+### Two-arm design & predictors
 
-| Scenario | Predictors added | Use case |
+Rather than fixed clinical scenarios, models use **parsimonious, SSA-feasible predictor sets** matched to what each data source actually carries — organised into two arms:
+
+| Arm | Sources | Predictors |
 |---|---|---|
-| **S1 — Antenatal** | Maternal demographics, household, environment | Early pregnancy risk |
-| **S2 — Intrapartum** | S1 + gestational age, delivery mode, facility delivery | Labour/admission |
-| **S3 — Postnatal** | S2 + birthweight, Apgar, preterm/LBW/SGA | Immediate newborn |
+| **A · Survey** | DHS + EN-INDEPTH | maternal age, twin, education, residence, wealth quintile, country, GDP, MMR |
+| **B · Clinical** | ALERT, PTBi, PRECISE, WHOMCS, NCOPS | maternal age, parity, twin, BMI, gestational age, ANC visits, country, GDP, MMR |
+
+- **Outcomes:** stillbirth · neonatal death · perinatal death (each modelled per arm).
+- **Leak-audited:** survey stillbirth/perinatal include DHS using `out_multiple` (twin) **instead of parity** — DHS stillbirth parity is a reproductive-calendar count (value leak); twin is measurement-consistent. Survey neonatal (livebirths) keeps real lifetime parity.
+- **Country-year context:** GDP (US$) and maternal mortality ratio, linked by study year (leak-safe).
+- Neonatal models add infant sex; clinical neonatal adds birthweight and delivery mode.
 
 ### Pipeline steps
 
@@ -184,6 +192,23 @@ mlflow ui                                             # inspect runs at http://l
 | `ml_pipeline/run_modeling_pipeline.py` | End-to-end training, CV, calibration, DCA, SHAP, IECV, fairness |
 | `ml_pipeline/generate_figures_tables.py` | Publication figures and performance tables |
 | `ml_pipeline/outputs_ML_results/` | Results, methodology references, MLflow artefacts |
+| `ml_pipeline/figures/` | AUROC / calibration / ROC-PR / DCA / SHAP / external figures |
+| `ml_pipeline/tables/` | Performance, extended metrics, external, per-country, fairness tables |
+
+### Results (interim, raw v10.18)
+
+Discrimination (AUROC) across 8 models × 2 arms × 3 outcomes, with 1000× cluster-bootstrap confidence intervals:
+
+<p align="center">
+  <img src="ml_pipeline/figures/F9_auroc_forest_by_arm.png" width="82%" alt="AUROC by arm and outcome">
+</p>
+
+| Arm | Stillbirth | Neonatal | Perinatal |
+|---|:--:|:--:|:--:|
+| **Survey** (DHS + EN-INDEPTH) | 0.66 | 0.66 | 0.64 |
+| **Clinical** (facility cohorts) | 0.75 | **0.77** | 0.73 |
+
+Best model = gradient boosting (XGBoost / CatBoost). **External validation:** clinical boosting up to **0.85** (India + Pakistan). Operating-point metrics (Se, Sp, PPV, NPV, F1, F2, MCC at the Youden threshold), per-country AUROC, and fairness by subgroup are in [`ml_pipeline/tables/`](ml_pipeline/tables/); all figures in [`ml_pipeline/figures/`](ml_pipeline/figures/).
 
 See [`ml_pipeline/README.md`](ml_pipeline/README.md) for full model specifications and usage.
 

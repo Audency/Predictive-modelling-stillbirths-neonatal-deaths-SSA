@@ -1,0 +1,130 @@
+arm,outcome,country,N,events,AUROC
+clinical,neonatal,The Gambia,392,2,0.983
+clinical,neonatal,Kenya,7429,144,0.836
+clinical,neonatal,Democratic Republic of the Congo,2794,47,0.806
+clinical,neonatal,Nigeria,3925,36,0.788
+clinical,neonatal,Niger,3565,21,0.787
+clinical,neonatal,Uganda,33011,523,0.772
+clinical,neonatal,Benin,9378,120,0.723
+clinical,neonatal,Malawi,15684,127,0.704
+clinical,neonatal,Angola,3321,31,0.678
+clinical,neonatal,Mozambique,589,3,0.644
+clinical,neonatal,Tanzania,7227,59,0.637
+clinical,perinatal,Kenya,7685,395,0.781
+clinical,perinatal,Nigeria,4211,326,0.739
+clinical,perinatal,Mozambique,647,28,0.723
+clinical,perinatal,Benin,10063,769,0.718
+clinical,perinatal,The Gambia,362,15,0.713
+clinical,perinatal,Democratic Republic of the Congo,2899,153,0.702
+clinical,perinatal,Niger,3686,140,0.687
+clinical,perinatal,Uganda,44039,3334,0.686
+clinical,perinatal,Malawi,16076,432,0.65
+clinical,perinatal,Tanzania,7266,157,0.65
+clinical,perinatal,Angola,3470,173,0.638
+clinical,stillbirth,Mozambique,616,24,0.802
+clinical,stillbirth,Kenya,7703,219,0.782
+clinical,stillbirth,Nigeria,4211,288,0.765
+clinical,stillbirth,Tanzania,7302,104,0.745
+clinical,stillbirth,Benin,10069,700,0.738
+clinical,stillbirth,The Gambia,375,14,0.717
+clinical,stillbirth,Uganda,44031,2789,0.694
+clinical,stillbirth,Niger,3686,119,0.688
+clinical,stillbirth,Malawi,16042,310,0.675
+clinical,stillbirth,Democratic Republic of the Congo,2899,99,0.668
+clinical,stillbirth,Angola,3470,148,0.605
+survey,neonatal,Gabon,2112,38,0.75
+survey,neonatal,Burkina Faso,9267,220,0.702
+survey,neonatal,Liberia,4306,144,0.684
+survey,neonatal,Ethiopia,2868,68,0.68
+survey,neonatal,Niger,4308,107,0.677
+survey,neonatal,Malawi,16857,445,0.67
+survey,neonatal,Zambia,10828,261,0.669
+survey,neonatal,Mozambique,6703,199,0.668
+survey,neonatal,Democratic Republic of the Congo,7734,180,0.664
+survey,neonatal,Benin,8524,209,0.663
+survey,neonatal,Namibia,1739,33,0.657
+survey,neonatal,Tanzania,9422,255,0.652
+survey,neonatal,The Gambia,5003,151,0.652
+survey,neonatal,Mali,11660,355,0.648
+survey,neonatal,Angola,8311,156,0.646
+survey,neonatal,Senegal,24527,658,0.645
+survey,neonatal,South Africa,1263,30,0.645
+survey,neonatal,Ghana,10991,212,0.644
+survey,neonatal,Cote d'Ivoire,3599,114,0.642
+survey,neonatal,Madagascar,4258,102,0.639
+survey,neonatal,Mauritania,3773,92,0.638
+survey,neonatal,Rwanda,8433,186,0.638
+survey,neonatal,Nigeria,30750,1111,0.637
+survey,neonatal,Sierra Leone,7036,223,0.637
+survey,neonatal,Burundi,7072,161,0.629
+survey,neonatal,Lesotho,1938,61,0.629
+survey,neonatal,Uganda,10905,292,0.62
+survey,neonatal,Guinea,2635,83,0.617
+survey,neonatal,Zimbabwe,4025,96,0.606
+survey,neonatal,Kenya,13505,266,0.573
+survey,neonatal,Comoros,968,17,0.557
+survey,neonatal,Guinea-Bissau,4517,151,0.551
+survey,perinatal,Ghana,11052,418,0.666
+survey,perinatal,The Gambia,5577,190,0.65
+survey,perinatal,Zambia,11080,292,0.649
+survey,perinatal,Burkina Faso,9341,219,0.644
+survey,perinatal,Lesotho,1995,74,0.642
+survey,perinatal,Malawi,16897,546,0.639
+survey,perinatal,Tanzania,9678,289,0.636
+survey,perinatal,Zimbabwe,3935,128,0.63
+survey,perinatal,Angola,8587,164,0.628
+survey,perinatal,Cote d'Ivoire,3824,86,0.627
+survey,perinatal,Mozambique,7088,201,0.627
+survey,perinatal,Niger,4114,126,0.625
+survey,perinatal,Namibia,1581,38,0.624
+survey,perinatal,Benin,9002,274,0.62
+survey,perinatal,Senegal,25582,907,0.619
+survey,perinatal,Uganda,11207,490,0.618
+survey,perinatal,Mali,11994,375,0.616
+survey,perinatal,Mauritania,3700,134,0.608
+survey,perinatal,Nigeria,30820,1182,0.607
+survey,perinatal,Kenya,13306,247,0.604
+survey,perinatal,Guinea,2666,104,0.601
+survey,perinatal,Ethiopia,2935,138,0.598
+survey,perinatal,Liberia,4552,169,0.595
+survey,perinatal,Madagascar,4126,137,0.592
+survey,perinatal,Sierra Leone,7523,240,0.588
+survey,perinatal,Comoros,1117,29,0.585
+survey,perinatal,Burundi,7429,267,0.574
+survey,perinatal,Gabon,2106,60,0.57
+survey,perinatal,Rwanda,8359,264,0.569
+survey,perinatal,Guinea-Bissau,4692,301,0.559
+survey,perinatal,South Africa,1201,44,0.557
+survey,perinatal,Democratic Republic of the Congo,7941,138,0.555
+survey,stillbirth,Ethiopia,2932,75,0.703
+survey,stillbirth,The Gambia,5685,89,0.688
+survey,stillbirth,Kenya,13851,161,0.687
+survey,stillbirth,Niger,4101,50,0.661
+survey,stillbirth,Zimbabwe,3798,45,0.661
+survey,stillbirth,Ghana,10936,251,0.659
+survey,stillbirth,Comoros,1052,6,0.657
+survey,stillbirth,Uganda,11627,235,0.654
+survey,stillbirth,Cote d'Ivoire,3861,101,0.643
+survey,stillbirth,Nigeria,31136,476,0.643
+survey,stillbirth,Gabon,2002,20,0.636
+survey,stillbirth,Mali,12027,181,0.633
+survey,stillbirth,Mauritania,3681,44,0.632
+survey,stillbirth,Liberia,4435,54,0.624
+survey,stillbirth,Zambia,11059,148,0.62
+survey,stillbirth,Democratic Republic of the Congo,7889,124,0.619
+survey,stillbirth,Senegal,25157,428,0.617
+survey,stillbirth,Mozambique,6886,83,0.615
+survey,stillbirth,Tanzania,9540,159,0.613
+survey,stillbirth,Rwanda,8275,113,0.61
+survey,stillbirth,Madagascar,4069,70,0.609
+survey,stillbirth,Sierra Leone,7316,47,0.609
+survey,stillbirth,Malawi,17215,253,0.606
+survey,stillbirth,Guinea-Bissau,4692,169,0.596
+survey,stillbirth,Burkina Faso,9427,129,0.592
+survey,stillbirth,Benin,8771,66,0.589
+survey,stillbirth,Burundi,7152,146,0.587
+survey,stillbirth,Angola,8440,63,0.575
+survey,stillbirth,Lesotho,1895,38,0.561
+survey,stillbirth,Guinea,2751,39,0.493
+survey,stillbirth,Namibia,1685,10,0.477
+survey,stillbirth,South Africa,1231,9,0.468
