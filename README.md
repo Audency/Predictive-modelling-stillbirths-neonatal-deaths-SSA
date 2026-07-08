@@ -4,6 +4,8 @@
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/Data-v10.17-orange?style=for-the-badge" alt="Dataset">
   <img src="https://img.shields.io/badge/Wellcome-Accelerator%20Award-E5B13A?style=for-the-badge" alt="Wellcome">
+  <img src="https://img.shields.io/badge/MLflow-tracked-0194E2?style=for-the-badge&logo=mlflow&logoColor=white" alt="MLflow">
+  <img src="https://img.shields.io/badge/Phase%203%20Modelling-In%20Progress-F97316?style=for-the-badge" alt="Modelling status">
 </p>
 
 # Predictive Modelling for Stillbirths and Neonatal Deaths in Sub-Saharan Africa
@@ -51,17 +53,17 @@ Reproducible analytical pipeline for data harmonisation and predictive modelling
 ```mermaid
 graph LR
     A["Phase 1<br/><b>Data Harmonisation</b><br/>R | pipeline/"] --> B["Phase 2<br/><b>Descriptive Analysis</b><br/>R | descriptive_analysis/"]
-    B --> C["Phase 3<br/><b>Predictive Modelling</b><br/>Python | upcoming"]
+    B --> C["Phase 3<br/><b>Predictive Modelling</b><br/>Python + MLflow | ml_pipeline/"]
     style A fill:#4575b4,color:#fff,stroke:#333
-    style B fill:#91bfdb,color:#1a1a2e,stroke:#333
-    style C fill:#fee090,color:#1a1a2e,stroke:#333,stroke-dasharray: 5 5
+    style B fill:#4575b4,color:#fff,stroke:#333
+    style C fill:#f97316,color:#fff,stroke:#333,stroke-width:2px
 ```
 
 | Phase | Directory | Language | Status |
 |-------|-----------|----------|--------|
-| 1. Data Harmonisation | `pipeline/` | R | Complete |
-| 2. Descriptive Analysis | `descriptive_analysis/` | R | Complete |
-| 3. Predictive Modelling | *TBD* | Python | Upcoming |
+| 1. Data Harmonisation | `pipeline/` | R | ✅ Complete |
+| 2. Descriptive Analysis | `descriptive_analysis/` | R | ✅ Complete |
+| 3. Predictive Modelling | `ml_pipeline/` | Python | 🚧 In Progress |
 
 ---
 
@@ -135,9 +137,55 @@ See [`descriptive_analysis/README.md`](descriptive_analysis/README.md) for full 
 
 ---
 
-## Phase 3: Predictive Modelling *(upcoming)*
+## Phase 3: Predictive Modelling &nbsp;·&nbsp; 🚧 In Progress
 
-Classical ML, ensemble methods, and deep learning approaches for stillbirth and neonatal death prediction. Implementation in Python.
+Classical, ensemble and neural-network models for **stillbirth** and **neonatal death** prediction, built on the harmonised unified dataset. The pipeline is leak-audited, cross-validated, calibrated, and fully **tracked with MLflow** for reproducible experiments. Implementation in Python under [`ml_pipeline/`](ml_pipeline/).
+
+### Models
+
+| Algorithm | Type |
+|---|---|
+| Logistic Regression (L2) | Baseline (interpretable) |
+| Random Forest | Ensemble |
+| XGBoost · LightGBM · CatBoost | Gradient boosting |
+| MLP (Optuna-tuned) | Neural network |
+
+### Clinical scenarios (progressive availability)
+
+| Scenario | Predictors added | Use case |
+|---|---|---|
+| **S1 — Antenatal** | Maternal demographics, household, environment | Early pregnancy risk |
+| **S2 — Intrapartum** | S1 + gestational age, delivery mode, facility delivery | Labour/admission |
+| **S3 — Postnatal** | S2 + birthweight, Apgar, preterm/LBW/SGA | Immediate newborn |
+
+### Pipeline steps
+
+1. Data loading, SSA filter, year ≥ 2010
+2. **Nested cross-validation** (5-fold outer × 3-fold inner) with SMOTE for class imbalance
+3. **Calibration** assessment (CITL, calibration slope, E/O ratio)
+4. **Decision Curve Analysis** (clinical net benefit)
+5. **SHAP** feature importance and interpretation
+6. **Internal–External Cross-Validation** (Leave-One-Country-Out) for transportability
+7. **Fairness / subgroup** analysis
+
+### Experiment tracking with MLflow
+
+Every run is logged to **MLflow** — parameters, metrics (AUROC, AUPRC, Brier, calibration slope), artefacts (SHAP plots, calibration curves, ROC/PR), and the fitted models — so experiments are versioned, comparable, and reproducible.
+
+```bash
+cd ml_pipeline
+conda run -n base python run_modeling_pipeline.py     # runs all models × scenarios, logs to MLflow
+python generate_figures_tables.py                     # figures + tables from the tracked runs
+mlflow ui                                             # inspect runs at http://localhost:5000
+```
+
+| Directory | Contents |
+|---|---|
+| `ml_pipeline/run_modeling_pipeline.py` | End-to-end training, CV, calibration, DCA, SHAP, IECV, fairness |
+| `ml_pipeline/generate_figures_tables.py` | Publication figures and performance tables |
+| `ml_pipeline/outputs_ML_results/` | Results, methodology references, MLflow artefacts |
+
+See [`ml_pipeline/README.md`](ml_pipeline/README.md) for full model specifications and usage.
 
 ---
 
